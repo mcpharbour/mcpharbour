@@ -1,8 +1,10 @@
-"""Tests for process_manager command parsing."""
+"""Tests for process_manager command parsing and HarbourDaemon."""
 
 import shlex
 import pytest
 from mcp_harbour.models import Server
+from mcp_harbour.process_manager import HarbourDaemon
+from tests.conftest import make_mock_process
 
 
 class TestCommandParsing:
@@ -37,3 +39,21 @@ class TestCommandParsing:
         exe, args = self._get_parsed_args("uvx mcp-server-bash")
         assert exe == "uvx"
         assert args == ["mcp-server-bash"]
+
+
+class TestHarbourDaemon:
+    def test_init_empty(self):
+        assert HarbourDaemon().shared_processes == {}
+
+    def test_get_shared_nonexistent(self):
+        assert HarbourDaemon().get_shared_process("nope") is None
+
+    @pytest.mark.asyncio
+    async def test_stop_all_shared(self):
+        daemon = HarbourDaemon()
+        proc = make_mock_process("test", ["tool"])
+        daemon.shared_processes["test"] = proc
+
+        await daemon.stop_all_shared()
+        proc.stop.assert_called_once()
+        assert daemon.shared_processes == {}

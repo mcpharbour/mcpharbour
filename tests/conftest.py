@@ -1,4 +1,6 @@
 import pytest
+from unittest.mock import AsyncMock, MagicMock
+from mcp.types import Tool, ListToolsResult, CallToolResult, TextContent, ListToolsRequest, CallToolRequest, CallToolRequestParams
 
 from mcp_harbour.models import (
     Server,
@@ -8,6 +10,56 @@ from mcp_harbour.models import (
     ToolPermission,
     ArgumentPolicy,
 )
+from mcp_harbour.process_manager import ServerProcess, HarbourDaemon
+from mcp_harbour.gateway import HarbourGateway
+
+
+def make_gateway(config_manager) -> HarbourGateway:
+    """Create a gateway with mocked internals pointing at the test config."""
+    gateway = HarbourGateway.__new__(HarbourGateway)
+    gateway.config_manager = config_manager
+    gateway.daemon = HarbourDaemon()
+    return gateway
+
+
+async def get_tools(session_server) -> list:
+    """Call list_tools on a session server and return the tool list."""
+    result = await session_server.request_handlers[ListToolsRequest](MagicMock())
+    return result.root.tools
+
+
+async def call_tool(session_server, name: str, arguments: dict = None):
+    """Call a tool on a session server and return the raw handler result."""
+    handler = session_server.request_handlers[CallToolRequest]
+    request = MagicMock()
+    request.params = CallToolRequestParams(name=name, arguments=arguments or {})
+    return await handler(request)
+
+
+def make_mock_process(server_name: str, tool_names: list[str]) -> ServerProcess:
+    """Create a mock ServerProcess with fake tools. Shared across integration tests."""
+    proc = MagicMock(spec=ServerProcess)
+    proc.server_config = Server(name=server_name, command="echo")
+    proc.session = MagicMock()
+
+    mock_tools = [
+        Tool(
+            name=name,
+            description=f"Mock {name}",
+            inputSchema={"type": "object", "properties": {}},
+        )
+        for name in tool_names
+    ]
+
+    proc.list_tools = AsyncMock(return_value=ListToolsResult(tools=mock_tools))
+    proc.call_tool = AsyncMock(
+        return_value=CallToolResult(
+            content=[TextContent(type="text", text=f"result from {server_name}")]
+        )
+    )
+    proc.stop = AsyncMock()
+
+    return proc
 
 
 @pytest.fixture
@@ -73,29 +125,5 @@ def restrictive_policy():
                     ],
                 )
             ]
-        },
-    )
-
-
-@pytest.fixture
-def wildcard_policy():
-    return AgentPolicy(
-        identity_name="admin-agent",
-        permissions={"filesystem": [ToolPermission(name="*", policies=[])]},
-    )
-
-
-@pytest.fixture
-def multi_server_policy():
-    return AgentPolicy(
-        identity_name="multi-agent",
-        permissions={
-            "filesystem": [
-                ToolPermission(name="read_*", policies=[]),
-            ],
-            "git": [
-                ToolPermission(name="git_status", policies=[]),
-                ToolPermission(name="git_log", policies=[]),
-            ],
         },
     )

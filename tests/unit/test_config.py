@@ -1,7 +1,7 @@
 """Tests for the ConfigManager."""
 
+import sys
 import pytest
-import json
 from mcp_harbour.models import Server, Identity, AgentPolicy, ToolPermission, ServerType
 
 
@@ -107,3 +107,55 @@ class TestConfigManagerPolicies:
 
         loaded = config_manager.load_policy("agent")
         assert loaded.permissions["fs"][0].name == "*"
+
+    def test_additive_append(self, config_manager):
+        p = AgentPolicy(
+            identity_name="agent",
+            permissions={"filesystem": [ToolPermission(name="read_file")]},
+        )
+        config_manager.save_policy(p)
+
+        loaded = config_manager.load_policy("agent")
+        loaded.permissions["filesystem"].append(ToolPermission(name="write_file"))
+        config_manager.save_policy(loaded)
+
+        final = config_manager.load_policy("agent")
+        tool_names = [t.name for t in final.permissions["filesystem"]]
+        assert "read_file" in tool_names
+        assert "write_file" in tool_names
+
+    def test_additive_across_servers(self, config_manager):
+        p = AgentPolicy(
+            identity_name="agent",
+            permissions={"filesystem": [ToolPermission(name="*")]},
+        )
+        config_manager.save_policy(p)
+
+        loaded = config_manager.load_policy("agent")
+        loaded.permissions["git"] = [ToolPermission(name="git_status")]
+        config_manager.save_policy(loaded)
+
+        final = config_manager.load_policy("agent")
+        assert "filesystem" in final.permissions
+        assert "git" in final.permissions
+
+
+# ─── Platform Config Dir ───────────────────────────────────────────
+
+
+class TestConfigPlatformDir:
+    # _get_config_dir() reads sys.platform at call time, not import time,
+    # so monkeypatching sys.platform works here.
+
+    def test_unix_config_dir(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        from mcp_harbour.config import _get_config_dir
+        assert ".mcp-harbour" in str(_get_config_dir())
+
+    def test_windows_config_dir(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setenv("APPDATA", "/fake/appdata")
+        from mcp_harbour.config import _get_config_dir
+        path = _get_config_dir()
+        assert "mcp-harbour" in str(path)
+        assert "appdata" in str(path).lower()

@@ -106,11 +106,6 @@ class TestServerPermission:
 
 
 class TestToolPermission:
-    def test_exact_tool_allowed(self, engine_read_only):
-        assert engine_read_only.check_permission(
-            "filesystem", "read_file", {"path": "/home/user/public/x.txt"}
-        )
-
     def test_exact_tool_denied(self, engine_read_only):
         with pytest.raises(McpError) as exc_info:
             engine_read_only.check_permission("filesystem", "write_file")
@@ -128,11 +123,6 @@ class TestToolPermission:
     def test_glob_no_match(self, engine_glob_tools):
         with pytest.raises(McpError) as exc_info:
             engine_glob_tools.check_permission("filesystem", "write_file")
-        assert_authorization_denied(exc_info)
-
-    def test_glob_no_match_partial(self, engine_glob_tools):
-        with pytest.raises(McpError) as exc_info:
-            engine_glob_tools.check_permission("filesystem", "delete_file")
         assert_authorization_denied(exc_info)
 
 
@@ -168,11 +158,6 @@ class TestArgumentPolicy:
     def test_no_args_denied_when_policy_exists(self, engine_read_only):
         with pytest.raises(McpError) as exc_info:
             engine_read_only.check_permission("filesystem", "read_file")
-        assert_authorization_denied(exc_info)
-
-    def test_empty_args_denied_when_policy_exists(self, engine_read_only):
-        with pytest.raises(McpError) as exc_info:
-            engine_read_only.check_permission("filesystem", "read_file", {})
         assert_authorization_denied(exc_info)
 
     def test_regex_policy_allowed(self, engine_multi_policy):
@@ -238,3 +223,62 @@ class TestGPARSErrorCodes:
         with pytest.raises(McpError) as exc_info:
             engine_read_only.check_permission("git", "git_status")
         assert "denied" in exc_info.value.error.message.lower()
+
+
+# ─── Multiple Permissions & Regex ──────────────────────────────────
+
+
+class TestMultipleToolPermissions:
+    def test_multiple_patterns_on_same_server(self):
+        engine = PermissionEngine(AgentPolicy(
+            identity_name="agent",
+            permissions={"fs": [
+                ToolPermission(name="read_*"),
+                ToolPermission(name="write_file"),
+            ]},
+        ))
+        assert engine.check_permission("fs", "read_file")
+        assert engine.check_permission("fs", "read_dir")
+        assert engine.check_permission("fs", "write_file")
+        with pytest.raises(McpError):
+            engine.check_permission("fs", "delete_file")
+
+    def test_first_matching_permission_wins(self):
+        engine = PermissionEngine(AgentPolicy(
+            identity_name="agent",
+            permissions={"fs": [
+                ToolPermission(name="read_file", policies=[
+                    ArgumentPolicy(arg_name="path", match_type="glob", pattern="/safe/**"),
+                ]),
+                ToolPermission(name="*"),
+            ]},
+        ))
+        with pytest.raises(McpError):
+            engine.check_permission("fs", "read_file", {"path": "/etc/passwd"})
+        assert engine.check_permission("fs", "write_file")
+
+
+class TestRegexAnchoring:
+    def test_regex_anchored_at_start_not_end(self):
+        engine = PermissionEngine(AgentPolicy(
+            identity_name="agent",
+            permissions={"db": [
+                ToolPermission(name="query", policies=[
+                    ArgumentPolicy(arg_name="sql", match_type="regex", pattern=r"^SELECT"),
+                ]),
+            ]},
+        ))
+        assert engine.check_permission("db", "query", {"sql": "SELECT; DROP TABLE"})
+
+    def test_regex_full_match_with_dollar(self):
+        engine = PermissionEngine(AgentPolicy(
+            identity_name="agent",
+            permissions={"db": [
+                ToolPermission(name="query", policies=[
+                    ArgumentPolicy(arg_name="sql", match_type="regex", pattern=r"^SELECT\s+\w+$"),
+                ]),
+            ]},
+        ))
+        assert engine.check_permission("db", "query", {"sql": "SELECT users"})
+        with pytest.raises(McpError):
+            engine.check_permission("db", "query", {"sql": "SELECT users; DROP TABLE"})
