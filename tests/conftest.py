@@ -86,44 +86,12 @@ def config_manager(tmp_config_dir, monkeypatch):
 
 
 @pytest.fixture
-def sample_server():
-    return Server(
-        name="filesystem",
-        command="npx -y @modelcontextprotocol/server-filesystem",
-        server_type=ServerType.stdio,
-    )
+def sample_server(config_manager):
+    return config_manager.add_server("test-server", command="echo")
 
 
 @pytest.fixture
-def sample_http_server():
-    return Server(
-        name="web-search",
-        url="http://localhost:3001/mcp",
-        server_type=ServerType.http,
-    )
+def sample_http_server(config_manager):
+    return config_manager.add_server("test-http-server", url="http://localhost:3001/mcp")
 
 
-@pytest.fixture
-def sample_identity():
-    return Identity(name="test-agent", key_prefix="harbour_sk_test")
-
-
-@pytest.fixture
-def restrictive_policy():
-    return AgentPolicy(
-        identity_name="test-agent",
-        permissions={
-            "filesystem": [
-                ToolPermission(
-                    name="read_file",
-                    policies=[
-                        ArgumentPolicy(
-                            arg_name="path",
-                            match_type="glob",
-                            pattern="/home/user/public/**",
-                        )
-                    ],
-                )
-            ]
-        },
-    )

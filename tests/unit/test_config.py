@@ -6,54 +6,78 @@ from mcp_harbour.models import Server, Identity, AgentPolicy, ToolPermission, Se
 
 
 class TestConfigManagerServers:
-    def test_add_server(self, config_manager, sample_server):
-        config_manager.add_server(sample_server)
-        assert config_manager.get_server("filesystem") == sample_server
+    def test_add_server(self, config_manager):
+        config_manager.add_server("filesystem", command="echo hello")
+        server = config_manager.get_server("filesystem")
+        assert server is not None
+        assert server.command == "echo hello"
 
-    def test_list_servers(self, config_manager, sample_server, sample_http_server):
-        config_manager.add_server(sample_server)
-        config_manager.add_server(sample_http_server)
+    def test_add_http_server(self, config_manager):
+        config_manager.add_server("remote", url="http://localhost:8000/mcp")
+        server = config_manager.get_server("remote")
+        assert server.url == "http://localhost:8000/mcp"
+        assert server.server_type.value == "http"
+
+    def test_add_server_rejects_both(self, config_manager):
+        with pytest.raises(ValueError):
+            config_manager.add_server("bad", command="echo", url="http://x")
+
+    def test_add_server_rejects_neither(self, config_manager):
+        with pytest.raises(ValueError):
+            config_manager.add_server("bad")
+
+    def test_add_duplicate_server_raises(self, config_manager):
+        config_manager.add_server("filesystem", command="echo")
+        with pytest.raises(ValueError, match="already exists"):
+            config_manager.add_server("filesystem", command="echo2")
+
+    def test_list_servers(self, config_manager):
+        config_manager.add_server("filesystem", command="echo")
+        config_manager.add_server("remote", url="http://localhost/mcp")
         servers = config_manager.list_servers()
         assert len(servers) == 2
-        names = {s.name for s in servers}
-        assert names == {"filesystem", "web-search"}
+        assert {s.name for s in servers} == {"filesystem", "remote"}
 
-    def test_remove_server(self, config_manager, sample_server):
-        config_manager.add_server(sample_server)
+    def test_remove_server(self, config_manager):
+        config_manager.add_server("filesystem", command="echo")
         config_manager.remove_server("filesystem")
         assert config_manager.get_server("filesystem") is None
 
-    def test_remove_nonexistent_is_safe(self, config_manager):
-        config_manager.remove_server("doesnt-exist")
+    def test_remove_nonexistent_raises(self, config_manager):
+        with pytest.raises(ValueError):
+            config_manager.remove_server("doesnt-exist")
 
     def test_get_nonexistent_returns_none(self, config_manager):
         assert config_manager.get_server("nope") is None
 
-    def test_persistence(
-        self, config_manager, sample_server, tmp_config_dir, monkeypatch
-    ):
-        config_manager.add_server(sample_server)
+    def test_persistence(self, config_manager, tmp_config_dir, monkeypatch):
+        config_manager.add_server("filesystem", command="echo hello")
 
         import mcp_harbour.config as config_mod
 
         cm2 = config_mod.ConfigManager()
         assert cm2.get_server("filesystem") is not None
-        assert cm2.get_server("filesystem").command == sample_server.command
+        assert cm2.get_server("filesystem").command == "echo hello"
 
 
 class TestConfigManagerIdentities:
-    def test_add_identity(self, config_manager, sample_identity):
-        config_manager.add_identity(sample_identity)
-        assert config_manager.get_identity("test-agent") == sample_identity
+    def test_add_identity(self, config_manager):
+        config_manager.add_identity("test-agent")
+        assert config_manager.get_identity("test-agent") is not None
+        assert config_manager.get_identity("test-agent").name == "test-agent"
+
+    def test_add_duplicate_identity_raises(self, config_manager):
+        config_manager.add_identity("test-agent")
+        with pytest.raises(ValueError, match="already exists"):
+            config_manager.add_identity("test-agent")
 
     def test_get_nonexistent_identity(self, config_manager):
         assert config_manager.get_identity("ghost") is None
 
-    def test_remove_identity(
-        self, config_manager, sample_identity, restrictive_policy
-    ):
-        config_manager.add_identity(sample_identity)
-        config_manager.save_policy(restrictive_policy)
+    def test_remove_identity_cascades_to_policy(self, config_manager):
+        config_manager.add_identity("test-agent")
+        config_manager.grant_permission("test-agent", "filesystem", tool="read_file",
+                                        arg_policies=["path=/home/user/public/**"])
 
         assert config_manager.get_identity("test-agent") is not None
         assert config_manager.load_policy("test-agent") is not None
@@ -63,81 +87,71 @@ class TestConfigManagerIdentities:
         assert config_manager.get_identity("test-agent") is None
         assert config_manager.load_policy("test-agent") is None
 
-    def test_remove_nonexistent_identity_is_safe(self, config_manager):
-        config_manager.remove_identity("doesnt-exist")
+    def test_remove_nonexistent_identity_raises(self, config_manager):
+        with pytest.raises(ValueError):
+            config_manager.remove_identity("doesnt-exist")
 
 
 class TestConfigManagerPolicies:
-    def test_create_policy(self, config_manager):
-        policy = config_manager.create_policy("new-agent")
-        assert policy.identity_name == "new-agent"
-        assert policy.permissions == {}
+    def test_grant_permission_creates_policy(self, config_manager):
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "filesystem", tool="read_file")
 
-    def test_save_and_load_policy(self, config_manager, restrictive_policy):
-        config_manager.save_policy(restrictive_policy)
-        loaded = config_manager.load_policy("test-agent")
-        assert loaded is not None
-        assert loaded.identity_name == "test-agent"
-        assert "filesystem" in loaded.permissions
-        assert loaded.permissions["filesystem"][0].name == "read_file"
+        policy = config_manager.load_policy("agent")
+        assert policy is not None
+        assert policy.permissions["filesystem"][0].name == "read_file"
+
+    def test_grant_permission_with_arg_policies(self, config_manager):
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "filesystem", tool="read_file",
+                                        arg_policies=["path=/home/user/**"])
+
+        policy = config_manager.load_policy("agent")
+        arg = policy.permissions["filesystem"][0].policies[0]
+        assert arg.arg_name == "path"
+        assert arg.match_type == "glob"
+        assert arg.pattern == "/home/user/**"
+
+    def test_grant_permission_with_regex(self, config_manager):
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "db", tool="query",
+                                        arg_policies=["sql=re:^SELECT.*"])
+
+        policy = config_manager.load_policy("agent")
+        arg = policy.permissions["db"][0].policies[0]
+        assert arg.match_type == "regex"
+        assert arg.pattern == "^SELECT.*"
+
+    def test_grant_permission_invalid_format_raises(self, config_manager):
+        config_manager.add_identity("agent")
+        with pytest.raises(ValueError, match="Invalid argument policy"):
+            config_manager.grant_permission("agent", "fs", arg_policies=["no_equals_sign"])
+
+    def test_grant_permission_identity_not_found_raises(self, config_manager):
+        with pytest.raises(ValueError, match="not found"):
+            config_manager.grant_permission("ghost", "filesystem")
 
     def test_load_nonexistent_policy(self, config_manager):
         assert config_manager.load_policy("nonexistent") is None
 
-    def test_policy_with_policies(self, config_manager, restrictive_policy):
-        config_manager.save_policy(restrictive_policy)
-        loaded = config_manager.load_policy("test-agent")
-        policy = loaded.permissions["filesystem"][0].policies[0]
-        assert policy.arg_name == "path"
-        assert policy.match_type == "glob"
-        assert policy.pattern == "/home/user/public/**"
+    def test_grant_permission_is_additive(self, config_manager):
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "filesystem", tool="read_file")
+        config_manager.grant_permission("agent", "filesystem", tool="write_file")
 
-    def test_overwrite_policy(self, config_manager):
-        p1 = AgentPolicy(
-            identity_name="agent",
-            permissions={"fs": [ToolPermission(name="read_file")]},
-        )
-        config_manager.save_policy(p1)
-
-        p2 = AgentPolicy(
-            identity_name="agent",
-            permissions={"fs": [ToolPermission(name="*")]},
-        )
-        config_manager.save_policy(p2)
-
-        loaded = config_manager.load_policy("agent")
-        assert loaded.permissions["fs"][0].name == "*"
-
-    def test_additive_append(self, config_manager):
-        p = AgentPolicy(
-            identity_name="agent",
-            permissions={"filesystem": [ToolPermission(name="read_file")]},
-        )
-        config_manager.save_policy(p)
-
-        loaded = config_manager.load_policy("agent")
-        loaded.permissions["filesystem"].append(ToolPermission(name="write_file"))
-        config_manager.save_policy(loaded)
-
-        final = config_manager.load_policy("agent")
-        tool_names = [t.name for t in final.permissions["filesystem"]]
+        policy = config_manager.load_policy("agent")
+        tool_names = [t.name for t in policy.permissions["filesystem"]]
         assert "read_file" in tool_names
         assert "write_file" in tool_names
 
-    def test_additive_across_servers(self, config_manager):
-        p = AgentPolicy(
-            identity_name="agent",
-            permissions={"filesystem": [ToolPermission(name="*")]},
-        )
-        config_manager.save_policy(p)
+    def test_grant_permission_additive_across_servers(self, config_manager):
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "filesystem", tool="*")
+        config_manager.grant_permission("agent", "git", tool="git_status")
 
-        loaded = config_manager.load_policy("agent")
-        loaded.permissions["git"] = [ToolPermission(name="git_status")]
-        config_manager.save_policy(loaded)
-
-        final = config_manager.load_policy("agent")
-        assert "filesystem" in final.permissions
-        assert "git" in final.permissions
+        policy = config_manager.load_policy("agent")
+        assert "filesystem" in policy.permissions
+        assert "git" in policy.permissions
 
 
 # ─── Platform Config Dir ───────────────────────────────────────────

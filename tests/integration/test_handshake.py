@@ -6,7 +6,6 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 
-from mcp_harbour.models import Server, Identity, AgentPolicy, ToolPermission
 from tests.conftest import make_mock_process, make_gateway
 
 
@@ -51,7 +50,7 @@ class TestHandshakeProtocol:
     @pytest.mark.asyncio
     async def test_valid_token(self, config_manager):
         gateway = _make_handshake_gateway(config_manager, "test-agent")
-        config_manager.add_identity(Identity(name="test-agent", key_prefix="harbour_sk_test..."))
+        config_manager.add_identity("test-agent")
 
         stream = MockStream()
         await stream.inject(b'{"auth": "harbour_sk_testtoken"}\n')
@@ -109,14 +108,12 @@ class TestRemainderHandling:
     @pytest.mark.asyncio
     async def test_data_after_handshake_not_lost(self, config_manager):
         """If handshake and first MCP message arrive in the same TCP chunk, both are processed."""
-        config_manager.add_identity(Identity(name="test-agent", key_prefix="harbour_sk_test..."))
-        config_manager.save_policy(
-            AgentPolicy(identity_name="test-agent", permissions={"filesystem": [ToolPermission(name="*")]})
-        )
+        config_manager.add_identity("test-agent")
+        config_manager.grant_permission("test-agent", "test-server", tool="*")
 
         gateway = _make_handshake_gateway(config_manager, "test-agent")
         gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("filesystem", ["read_file"])
+            return_value=make_mock_process("test-server", ["read_file"])
         )
 
         initialize_msg = json.dumps({

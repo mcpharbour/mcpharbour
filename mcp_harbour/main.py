@@ -4,13 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 from rich.console import Console
 from rich.table import Table
-from .models import Server, ServerType, Identity, ToolPermission, ArgumentPolicy
 from .config import ConfigManager
-
-import secrets
-import string
-import keyring
-import bcrypt
 
 app = typer.Typer(help="MCP Harbour: Manage your MCP servers and permissions.")
 console = Console()
@@ -23,6 +17,15 @@ app.add_typer(identity_app, name="identity", help="Manage identities (Captains)"
 # Sub-typer for permission management
 permit_app = typer.Typer()
 app.add_typer(permit_app, name="permit", help="Manage permissions (Policies)")
+
+
+def _handle(fn, *args, **kwargs):
+    """Call a service method and display any error cleanly."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -40,46 +43,20 @@ def dock(
       harbour dock --name filesystem --command "npx -y @modelcontextprotocol/server-filesystem /home/user"
       harbour dock --name remote-api --url "http://localhost:8000/mcp"
     """
-    if command and url:
-        console.print("[bold red]Error:[/bold red] Provide --command or --url, not both.")
-        raise typer.Exit(code=1)
-
-    if not command and not url:
-        console.print("[bold red]Error:[/bold red] Provide --command (stdio) or --url (http).")
-        raise typer.Exit(code=1)
-
-    if config_manager.get_server(name):
-        console.print(f"[bold red]Error:[/bold red] Server '{name}' already docked.")
-        raise typer.Exit(code=1)
-
-    if command:
-        server = Server(name=name, command=command, server_type=ServerType.stdio)
-    else:
-        server = Server(name=name, url=url, server_type=ServerType.http)
-    config_manager.add_server(server)
-    console.print(
-        f"[bold green]Success:[/bold green] Server '{name}' docked successfully!"
-    )
+    _handle(config_manager.add_server, name, command=command, url=url)
+    console.print(f"[bold green]Success:[/bold green] Server '{name}' docked successfully!")
 
 
 @app.command()
 def undock(name: str):
-    """
-    Undock (remove) an MCP server.
-    """
-    if not config_manager.get_server(name):
-        console.print(f"[bold red]Error:[/bold red] Server '{name}' not found.")
-        raise typer.Exit(code=1)
-
-    config_manager.remove_server(name)
+    """Undock (remove) an MCP server."""
+    _handle(config_manager.remove_server, name)
     console.print(f"[bold green]Success:[/bold green] Server '{name}' undocked.")
 
 
 @app.command("list")
 def list_servers():
-    """
-    List all docked MCP servers.
-    """
+    """List all docked MCP servers."""
     servers = config_manager.list_servers()
     if not servers:
         console.print("No servers docked.")
@@ -90,20 +67,13 @@ def list_servers():
     table.add_column("Command", style="magenta")
     table.add_column("Type", style="green")
     for server in servers:
-        table.add_row(
-            server.name,
-            server.command or server.url,
-            server.server_type.value,
-        )
-
+        table.add_row(server.name, server.command or server.url, server.server_type.value)
     console.print(table)
 
 
 @app.command()
 def inspect(name: str):
-    """
-    Inspect details of a docked server.
-    """
+    """Inspect details of a docked server."""
     server = config_manager.get_server(name)
     if not server:
         console.print(f"[bold red]Error:[/bold red] Server '{name}' not found.")
@@ -123,9 +93,7 @@ def serve(
     host: str = typer.Option(None, help="Host to bind (default: 127.0.0.1)"),
     port: int = typer.Option(None, help="Port to bind (default: 4767)"),
 ):
-    """
-    Start the Harbour Daemon in the foreground.
-    """
+    """Start the Harbour Daemon in the foreground."""
     from .gateway import HarbourGateway
     from .config import DEFAULT_HOST, DEFAULT_PORT
     import sys
@@ -143,9 +111,7 @@ def serve(
 
 @app.command()
 def start():
-    """
-    Start the Harbour Daemon via the platform service manager.
-    """
+    """Start the Harbour Daemon via the platform service manager."""
     import subprocess
     import sys
 
@@ -164,9 +130,7 @@ def start():
 
 @app.command()
 def stop():
-    """
-    Stop the Harbour Daemon via the platform service manager.
-    """
+    """Stop the Harbour Daemon via the platform service manager."""
     import subprocess
     import sys
 
@@ -185,9 +149,7 @@ def stop():
 
 @app.command()
 def status():
-    """
-    Check if the Harbour Daemon is running.
-    """
+    """Check if the Harbour Daemon is running."""
     import subprocess
     import sys
 
@@ -227,21 +189,7 @@ def status():
 @identity_app.command("create")
 def identity_create(name: str):
     """Create a new identity (Captain) and generate an API key."""
-    if config_manager.get_identity(name):
-        console.print(f"[bold red]Identity '{name}' already exists![/bold red]")
-        raise typer.Exit(1)
-
-    alphabet = string.ascii_letters + string.digits
-    token = "".join(secrets.choice(alphabet) for i in range(32))
-    api_key = f"harbour_sk_{token}"
-    key_prefix = api_key[:15] + "..."
-
-    hashed_key_bytes = bcrypt.hashpw(api_key.encode(), bcrypt.gensalt())
-    keyring.set_password("mcp-harbour", name, hashed_key_bytes.decode())
-
-    identity = Identity(name=name, key_prefix=key_prefix)
-    config_manager.add_identity(identity)
-
+    api_key = _handle(config_manager.add_identity, name)
     console.print(f"[bold green]Identity '{name}' created successfully![/bold green]")
     console.print(f"API Key: [bold]{api_key}[/bold]")
     console.print("[yellow]Keep this key safe! It won't be shown again.[/yellow]")
@@ -251,7 +199,6 @@ def identity_create(name: str):
 def identity_list():
     """List all identities."""
     identities = config_manager.config.identities
-
     if not identities:
         console.print("No identities found.")
         return
@@ -259,26 +206,15 @@ def identity_list():
     table = Table(title="Docked Captains (Identities)")
     table.add_column("Name", style="cyan")
     table.add_column("API Key Prefix", style="magenta")
-
     for name, identity in identities.items():
         table.add_row(name, identity.key_prefix)
-
     console.print(table)
 
 
 @identity_app.command("delete")
 def identity_delete(name: str):
     """Delete an identity (Captain) and its policy."""
-    if not config_manager.get_identity(name):
-        console.print(f"[bold red]Error:[/bold red] Identity '{name}' not found.")
-        raise typer.Exit(code=1)
-
-    try:
-        keyring.delete_password("mcp-harbour", name)
-    except keyring.errors.PasswordDeleteError:
-        pass
-
-    config_manager.remove_identity(name)
+    _handle(config_manager.remove_identity, name)
     console.print(f"[bold green]Success:[/bold green] Identity '{name}' deleted.")
 
 
@@ -299,60 +235,19 @@ def permit_allow(
       harbour permit allow agent filesystem --tool "read_*" --args "path=/home/user/**"
       harbour permit allow agent db --tool "query" --args "sql=re:^SELECT.*" "db=production"
     """
-    if not config_manager.get_identity(identity):
-        console.print(f"[bold red]Identity '{identity}' not found![/bold red]")
-        raise typer.Exit(1)
-
     if not config_manager.get_server(server) and server != "*":
-        console.print(
-            f"[yellow]Warning: Server '{server}' is not currently docked.[/yellow]"
-        )
+        console.print(f"[yellow]Warning: Server '{server}' is not currently docked.[/yellow]")
 
-    policies = []
-    if args:
-        for arg_str in args:
-            try:
-                key, pattern = arg_str.split("=", 1)
-                if pattern.startswith("re:"):
-                    match_type = "regex"
-                    pattern = pattern[3:]
-                else:
-                    match_type = "glob"
-
-                policies.append(
-                    ArgumentPolicy(arg_name=key, match_type=match_type, pattern=pattern)
-                )
-            except ValueError:
-                console.print(
-                    f"[bold red]Invalid argument policy format: {arg_str}. Use key=pattern or key=re:pattern[/bold red]"
-                )
-                raise typer.Exit(1)
-
-    policy = config_manager.load_policy(identity)
-    if not policy:
-        policy = config_manager.create_policy(identity)
-
-    if server not in policy.permissions:
-        policy.permissions[server] = []
-
-    new_perm = ToolPermission(name=tool, policies=policies)
-    policy.permissions[server].append(new_perm)
-
-    config_manager.save_policy(policy)
-    console.print(
-        f"[bold green]Permission granted for '{identity}' on '{server}' tool '{tool}'[/bold green]"
-    )
+    _handle(config_manager.grant_permission, identity, server, tool=tool, arg_policies=args)
+    console.print(f"[bold green]Permission granted for '{identity}' on '{server}' tool '{tool}'[/bold green]")
 
 
 @permit_app.command("show")
 def permit_show(identity: str):
     """Show the policy for an identity."""
     policy = config_manager.load_policy(identity)
-
     if not policy:
-        console.print(
-            f"[yellow]No policy found for '{identity}'. (Access Denied All)[/yellow]"
-        )
+        console.print(f"[yellow]No policy found for '{identity}'. (Access Denied All)[/yellow]")
         return
 
     console.print(f"[bold]Policy for {identity}:[/bold]")
@@ -362,10 +257,8 @@ def permit_show(identity: str):
             pol_str = ""
             if tool.policies:
                 pol_str = " -> " + ", ".join(
-                    [
-                        f"{p.arg_name}={'re:' if p.match_type == 'regex' else ''}{p.pattern}"
-                        for p in tool.policies
-                    ]
+                    f"{p.arg_name}={'re:' if p.match_type == 'regex' else ''}{p.pattern}"
+                    for p in tool.policies
                 )
             console.print(f"    - Tool: [green]{tool.name}[/green]{pol_str}")
 

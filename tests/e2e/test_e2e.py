@@ -9,25 +9,11 @@ Requires `npx` to be available.
 import json
 import socket
 import asyncio
-import secrets
-import string
 import pytest
 import pytest_asyncio
-import keyring
-import bcrypt
 
 from mcp_harbour.gateway import HarbourGateway
 from mcp_harbour.config import ConfigManager
-from mcp_harbour.models import (
-    Server,
-    Identity,
-    AgentPolicy,
-    ToolPermission,
-    ArgumentPolicy,
-)
-
-# Unique keyring service per test run to avoid pollution
-_KEYRING_SERVICE = f"mcp-harbour-test-{secrets.token_hex(4)}"
 
 
 # ─── Helpers ────────────────────────────────────────────────────────
@@ -37,11 +23,6 @@ def find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def generate_token() -> str:
-    alphabet = string.ascii_letters + string.digits
-    return f"harbour_sk_{''.join(secrets.choice(alphabet) for _ in range(32))}"
 
 
 class MCPClient:
@@ -137,47 +118,21 @@ def e2e_port():
 
 @pytest.fixture
 def e2e_setup(e2e_config, e2e_dir, e2e_port):
-    # Dock server-everything
-    e2e_config.add_server(Server(
-        name="everything",
-        command="npx -y @modelcontextprotocol/server-everything",
-    ))
+    # Dock server-everything using the service method
+    e2e_config.add_server("everything", command="npx -y @modelcontextprotocol/server-everything")
 
-    # Create tokens and identities
-    full_token = generate_token()
-    restricted_token = generate_token()
-    no_policy_token = generate_token()
+    # Create identities using the service method (generates tokens, hashes, stores in keyring)
+    full_token = e2e_config.add_identity("full-access")
+    restricted_token = e2e_config.add_identity("restricted")
+    no_policy_token = e2e_config.add_identity("no-policy")
 
-    for name, token in [
-        ("full-access", full_token),
-        ("restricted", restricted_token),
-        ("no-policy", no_policy_token),
-    ]:
-        hashed = bcrypt.hashpw(token.encode(), bcrypt.gensalt()).decode()
-        keyring.set_password(_KEYRING_SERVICE, name, hashed)
-        e2e_config.add_identity(Identity(name=name, key_prefix=token[:15] + "..."))
+    # Grant permissions using the service method
+    e2e_config.grant_permission("full-access", "everything", tool="*")
+    e2e_config.grant_permission("restricted", "everything", tool="echo")
+    e2e_config.grant_permission("restricted", "everything", tool="get-sum",
+                                arg_policies=["a=re:^\\d+$"])
 
-    # Full access policy
-    e2e_config.save_policy(AgentPolicy(
-        identity_name="full-access",
-        permissions={"everything": [ToolPermission(name="*")]},
-    ))
-
-    # Restricted policy — only echo and get-sum
-    e2e_config.save_policy(AgentPolicy(
-        identity_name="restricted",
-        permissions={
-            "everything": [
-                ToolPermission(name="echo"),
-                ToolPermission(
-                    name="get-sum",
-                    policies=[
-                        ArgumentPolicy(arg_name="a", match_type="regex", pattern=r"^\d+$"),
-                    ],
-                ),
-            ]
-        },
-    ))
+    # no-policy identity gets nothing — default deny
 
     return {
         "config": e2e_config,
@@ -191,12 +146,7 @@ def e2e_setup(e2e_config, e2e_dir, e2e_port):
 
 
 @pytest_asyncio.fixture
-async def e2e_daemon(e2e_setup, monkeypatch):
-    # Patch keyring service name so the gateway reads from our test keyring
-    _real_keyring_get = keyring.get_password
-    monkeypatch.setattr("mcp_harbour.gateway.keyring.get_password",
-                        lambda service, name: _real_keyring_get(_KEYRING_SERVICE, name))
-
+async def e2e_daemon(e2e_setup):
     gateway = HarbourGateway()
     port = e2e_setup["port"]
 

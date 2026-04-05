@@ -2,15 +2,15 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from mcp_harbour.models import Server, AgentPolicy, ToolPermission, ArgumentPolicy
+from mcp_harbour.models import AgentPolicy, ToolPermission, ArgumentPolicy
 from tests.conftest import make_mock_process, make_gateway, get_tools, call_tool
 
 
 def create_admin_policy(config_manager, servers=None):
     if servers is None:
-        servers = ["filesystem"]
-    perms = {s: [ToolPermission(name="*")] for s in servers}
-    config_manager.save_policy(AgentPolicy(identity_name="admin", permissions=perms))
+        servers = ["test-server"]
+    for s in servers:
+        config_manager.grant_permission("admin", s, tool="*")
 
 
 # ─── Session Creation ────────────────────────────────────────────────
@@ -19,11 +19,11 @@ def create_admin_policy(config_manager, servers=None):
 class TestCreateSession:
     @pytest.mark.asyncio
     async def test_stdio_server_spawns_per_client(self, config_manager, sample_server):
-        config_manager.add_server(sample_server)
+        config_manager.add_identity("admin")
         create_admin_policy(config_manager)
 
         gateway = make_gateway(config_manager)
-        mock_proc = make_mock_process("filesystem", ["read_file", "write_file"])
+        mock_proc = make_mock_process("test-server", ["read_file", "write_file"])
         gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
 
         session_server, owned = await gateway.create_session("admin")
@@ -34,14 +34,12 @@ class TestCreateSession:
 
     @pytest.mark.asyncio
     async def test_http_server_reuses_shared(self, config_manager, sample_http_server):
-        config_manager.add_server(sample_http_server)
-        config_manager.save_policy(
-            AgentPolicy(identity_name="admin", permissions={"web-search": [ToolPermission(name="*")]})
-        )
+        config_manager.add_identity("admin")
+        config_manager.grant_permission("admin", "test-http-server", tool="*")
 
         gateway = make_gateway(config_manager)
-        shared_proc = make_mock_process("web-search", ["search"])
-        gateway.daemon.shared_processes["web-search"] = shared_proc
+        shared_proc = make_mock_process("test-http-server", ["search"])
+        gateway.daemon.shared_processes["test-http-server"] = shared_proc
 
         _, owned = await gateway.create_session("admin")
         assert len(owned) == 0
@@ -53,14 +51,13 @@ class TestCreateSession:
 class TestToolDiscovery:
     @pytest.mark.asyncio
     async def test_single_server(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.save_policy(
-            AgentPolicy(identity_name="agent", permissions={"filesystem": [ToolPermission(name="*")]})
-        )
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="*")
 
         gateway = make_gateway(config_manager)
         gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("filesystem", ["read_file", "write_file", "list_dir"])
+            return_value=make_mock_process("test-server", ["read_file", "write_file", "list_dir"])
         )
 
         session_server, _ = await gateway.create_session("agent")
@@ -71,16 +68,15 @@ class TestToolDiscovery:
 
     @pytest.mark.asyncio
     async def test_multiple_servers(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.add_server(Server(name="git", command="echo"))
-        config_manager.save_policy(AgentPolicy(
-            identity_name="agent",
-            permissions={"filesystem": [ToolPermission(name="*")], "git": [ToolPermission(name="*")]},
-        ))
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_server("git", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="*")
+        config_manager.grant_permission("agent", "git", tool="*")
 
         gateway = make_gateway(config_manager)
         gateway.daemon.spawn_stdio_instance = AsyncMock(side_effect=[
-            make_mock_process("filesystem", ["read_file", "write_file"]),
+            make_mock_process("test-server", ["read_file", "write_file"]),
             make_mock_process("git", ["git_status", "git_log"]),
         ])
 
@@ -91,14 +87,12 @@ class TestToolDiscovery:
 
     @pytest.mark.asyncio
     async def test_filtered_by_exact_tool_name(self, config_manager, sample_server):
-        config_manager.add_server(sample_server)
-        config_manager.save_policy(
-            AgentPolicy(identity_name="reader", permissions={"filesystem": [ToolPermission(name="read_file")]})
-        )
+        config_manager.add_identity("reader")
+        config_manager.grant_permission("reader", "test-server", tool="read_file")
 
         gateway = make_gateway(config_manager)
         gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("filesystem", ["read_file", "write_file", "delete_file"])
+            return_value=make_mock_process("test-server", ["read_file", "write_file", "delete_file"])
         )
 
         session_server, _ = await gateway.create_session("reader")
@@ -109,14 +103,13 @@ class TestToolDiscovery:
 
     @pytest.mark.asyncio
     async def test_filtered_by_glob(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.save_policy(
-            AgentPolicy(identity_name="agent", permissions={"filesystem": [ToolPermission(name="read_*")]})
-        )
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="read_*")
 
         gateway = make_gateway(config_manager)
         gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("filesystem", ["read_file", "read_dir", "write_file", "delete_file"])
+            return_value=make_mock_process("test-server", ["read_file", "read_dir", "write_file", "delete_file"])
         )
 
         session_server, _ = await gateway.create_session("agent")
@@ -124,15 +117,14 @@ class TestToolDiscovery:
 
     @pytest.mark.asyncio
     async def test_server_not_in_policy_skipped(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.add_server(Server(name="bash", command="echo"))
-        config_manager.save_policy(
-            AgentPolicy(identity_name="agent", permissions={"filesystem": [ToolPermission(name="*")]})
-        )
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_server("bash", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="*")
 
         gateway = make_gateway(config_manager)
         gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("filesystem", ["read_file"])
+            return_value=make_mock_process("test-server", ["read_file"])
         )
 
         await gateway.create_session("agent")
@@ -145,7 +137,8 @@ class TestToolDiscovery:
 class TestDefaultDeny:
     @pytest.mark.asyncio
     async def test_no_policy(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_identity("unknown-agent")
 
         gateway = make_gateway(config_manager)
         gateway.daemon.spawn_stdio_instance = AsyncMock()
@@ -155,8 +148,10 @@ class TestDefaultDeny:
 
     @pytest.mark.asyncio
     async def test_empty_policy(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.save_policy(AgentPolicy(identity_name="empty-agent", permissions={}))
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_identity("empty-agent")
+        # create_policy makes an empty permissions dict
+        config_manager.create_policy("empty-agent")
 
         gateway = make_gateway(config_manager)
         gateway.daemon.spawn_stdio_instance = AsyncMock()
@@ -172,15 +167,14 @@ class TestDefaultDeny:
 class TestToolCalls:
     @pytest.mark.asyncio
     async def test_routes_to_correct_server(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.add_server(Server(name="git", command="echo"))
-        config_manager.save_policy(AgentPolicy(
-            identity_name="agent",
-            permissions={"filesystem": [ToolPermission(name="*")], "git": [ToolPermission(name="*")]},
-        ))
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_server("git", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="*")
+        config_manager.grant_permission("agent", "git", tool="*")
 
         gateway = make_gateway(config_manager)
-        fs_proc = make_mock_process("filesystem", ["read_file"])
+        fs_proc = make_mock_process("test-server", ["read_file"])
         git_proc = make_mock_process("git", ["git_status"])
         gateway.daemon.spawn_stdio_instance = AsyncMock(side_effect=[fs_proc, git_proc])
 
@@ -195,18 +189,13 @@ class TestToolCalls:
 
     @pytest.mark.asyncio
     async def test_argument_policy_allowed(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.save_policy(AgentPolicy(
-            identity_name="agent",
-            permissions={"filesystem": [
-                ToolPermission(name="read_file", policies=[
-                    ArgumentPolicy(arg_name="path", match_type="glob", pattern="/home/user/**")
-                ])
-            ]},
-        ))
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="read_file",
+                                        arg_policies=["path=/home/user/**"])
 
         gateway = make_gateway(config_manager)
-        mock_proc = make_mock_process("filesystem", ["read_file"])
+        mock_proc = make_mock_process("test-server", ["read_file"])
         gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
 
         session_server, _ = await gateway.create_session("agent")
@@ -215,18 +204,13 @@ class TestToolCalls:
 
     @pytest.mark.asyncio
     async def test_argument_policy_denied(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.save_policy(AgentPolicy(
-            identity_name="agent",
-            permissions={"filesystem": [
-                ToolPermission(name="read_file", policies=[
-                    ArgumentPolicy(arg_name="path", match_type="glob", pattern="/home/user/**")
-                ])
-            ]},
-        ))
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="read_file",
+                                        arg_policies=["path=/home/user/**"])
 
         gateway = make_gateway(config_manager)
-        mock_proc = make_mock_process("filesystem", ["read_file"])
+        mock_proc = make_mock_process("test-server", ["read_file"])
         gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
 
         session_server, _ = await gateway.create_session("agent")
@@ -237,13 +221,11 @@ class TestToolCalls:
 
     @pytest.mark.asyncio
     async def test_denied_tool_returns_error(self, config_manager, sample_server):
-        config_manager.add_server(sample_server)
-        config_manager.save_policy(
-            AgentPolicy(identity_name="readonly", permissions={"filesystem": [ToolPermission(name="read_file")]})
-        )
+        config_manager.add_identity("readonly")
+        config_manager.grant_permission("readonly", "test-server", tool="read_file")
 
         gateway = make_gateway(config_manager)
-        mock_proc = make_mock_process("filesystem", ["read_file", "write_file"])
+        mock_proc = make_mock_process("test-server", ["read_file", "write_file"])
         gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
 
         session_server, _ = await gateway.create_session("readonly")
@@ -255,13 +237,12 @@ class TestToolCalls:
 
     @pytest.mark.asyncio
     async def test_unknown_tool(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.save_policy(
-            AgentPolicy(identity_name="agent", permissions={"filesystem": [ToolPermission(name="read_file")]})
-        )
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="read_file")
 
         gateway = make_gateway(config_manager)
-        mock_proc = make_mock_process("filesystem", ["read_file"])
+        mock_proc = make_mock_process("test-server", ["read_file"])
         gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
 
         session_server, _ = await gateway.create_session("agent")
@@ -272,13 +253,12 @@ class TestToolCalls:
 
     @pytest.mark.asyncio
     async def test_unavailable_server(self, config_manager):
-        config_manager.add_server(Server(name="filesystem", command="echo"))
-        config_manager.save_policy(
-            AgentPolicy(identity_name="agent", permissions={"filesystem": [ToolPermission(name="*")]})
-        )
+        config_manager.add_server("test-server", command="echo")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "test-server", tool="*")
 
         gateway = make_gateway(config_manager)
-        mock_proc = make_mock_process("filesystem", ["read_file"])
+        mock_proc = make_mock_process("test-server", ["read_file"])
         mock_proc.session = None
         gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
 
@@ -294,11 +274,11 @@ class TestToolCalls:
 class TestProcessLifecycle:
     @pytest.mark.asyncio
     async def test_owned_processes_can_be_stopped(self, config_manager, sample_server):
-        config_manager.add_server(sample_server)
+        config_manager.add_identity("admin")
         create_admin_policy(config_manager)
 
         gateway = make_gateway(config_manager)
-        mock_proc = make_mock_process("filesystem", ["read_file"])
+        mock_proc = make_mock_process("test-server", ["read_file"])
         gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
 
         _, owned = await gateway.create_session("admin")
@@ -308,12 +288,12 @@ class TestProcessLifecycle:
 
     @pytest.mark.asyncio
     async def test_separate_processes_per_session(self, config_manager, sample_server):
-        config_manager.add_server(sample_server)
+        config_manager.add_identity("admin")
         create_admin_policy(config_manager)
 
         gateway = make_gateway(config_manager)
-        proc_a = make_mock_process("filesystem", ["read_file"])
-        proc_b = make_mock_process("filesystem", ["read_file"])
+        proc_a = make_mock_process("test-server", ["read_file"])
+        proc_b = make_mock_process("test-server", ["read_file"])
         gateway.daemon.spawn_stdio_instance = AsyncMock(side_effect=[proc_a, proc_b])
 
         _, owned_a = await gateway.create_session("admin")

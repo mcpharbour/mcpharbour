@@ -2,62 +2,38 @@
 
 import pytest
 from unittest.mock import patch
-import bcrypt
 
-from mcp_harbour.models import Identity
 from tests.conftest import make_gateway
 
 
 class TestResolveIdentityFromToken:
-    def _setup_gateway_with_identities(self, config_manager, identities: dict):
-        """Set up a gateway with identities and their tokens stored in a mock keyring."""
-        hashed_tokens = {}
-        for name, token in identities.items():
-            config_manager.add_identity(Identity(name=name, key_prefix=token[:15] + "..."))
-            hashed_tokens[name] = bcrypt.hashpw(token.encode(), bcrypt.gensalt()).decode()
+    def test_resolves_correct_identity(self, config_manager):
+        token_a = config_manager.add_identity("agent-a")
+        token_b = config_manager.add_identity("agent-b")
 
         gateway = make_gateway(config_manager)
-
-        def mock_keyring_get(service, name):
-            return hashed_tokens.get(name)
-
-        return gateway, mock_keyring_get
-
-    def test_resolves_correct_identity(self, config_manager):
-        gateway, mock_get = self._setup_gateway_with_identities(config_manager, {
-            "agent-a": "harbour_sk_aaaa",
-            "agent-b": "harbour_sk_bbbb",
-        })
-
-        with patch("mcp_harbour.gateway.keyring.get_password", side_effect=mock_get):
-            assert gateway._resolve_identity_from_token("harbour_sk_aaaa") == "agent-a"
-            assert gateway._resolve_identity_from_token("harbour_sk_bbbb") == "agent-b"
+        assert gateway._resolve_identity_from_token(token_a) == "agent-a"
+        assert gateway._resolve_identity_from_token(token_b) == "agent-b"
 
     def test_returns_none_for_unknown_token(self, config_manager):
-        gateway, mock_get = self._setup_gateway_with_identities(config_manager, {
-            "agent-a": "harbour_sk_aaaa",
-        })
+        config_manager.add_identity("agent-a")
 
-        with patch("mcp_harbour.gateway.keyring.get_password", side_effect=mock_get):
-            assert gateway._resolve_identity_from_token("harbour_sk_wrong") is None
+        gateway = make_gateway(config_manager)
+        assert gateway._resolve_identity_from_token("harbour_sk_wrong_token_here") is None
 
     def test_returns_none_when_no_identities(self, config_manager):
         gateway = make_gateway(config_manager)
-
-        with patch("mcp_harbour.gateway.keyring.get_password", return_value=None):
-            assert gateway._resolve_identity_from_token("harbour_sk_any") is None
+        assert gateway._resolve_identity_from_token("harbour_sk_any") is None
 
     def test_handles_keyring_error_gracefully(self, config_manager):
-        config_manager.add_identity(Identity(name="agent", key_prefix="harbour_sk_test..."))
+        config_manager.add_identity("agent")
         gateway = make_gateway(config_manager)
 
         with patch("mcp_harbour.gateway.keyring.get_password", side_effect=Exception("keyring broke")):
             assert gateway._resolve_identity_from_token("harbour_sk_test") is None
 
     def test_does_not_match_partial_token(self, config_manager):
-        gateway, mock_get = self._setup_gateway_with_identities(config_manager, {
-            "agent": "harbour_sk_full_token_here",
-        })
+        token = config_manager.add_identity("agent")
 
-        with patch("mcp_harbour.gateway.keyring.get_password", side_effect=mock_get):
-            assert gateway._resolve_identity_from_token("harbour_sk_full") is None
+        gateway = make_gateway(config_manager)
+        assert gateway._resolve_identity_from_token(token[:20]) is None

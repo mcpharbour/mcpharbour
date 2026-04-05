@@ -17,12 +17,11 @@ pytest tests/e2e        # needs npx
 - ToolPermission, AgentPolicy, Config: creation, empty states
 - JSON roundtrip for Server and AgentPolicy
 
-**[test_config.py](unit/test_config.py)** — ConfigManager
+**[test_config.py](unit/test_config.py)** — ConfigManager service methods
 
-- Servers: add, list, remove, persistence across restarts
-- Identities: add, remove (cascades to policy), nonexistent
-- Policies: create, save/load, overwrite, argument policies survive roundtrip
-- Additive: appending rules, adding servers to existing policy
+- Servers: add (stdio/http), validation (both/neither/duplicate), list, remove, persistence
+- Identities: add, duplicate raises, remove cascades to policy, nonexistent raises
+- Policies: grant_permission creates policy, argument policies (glob/regex), invalid format raises, identity not found raises, additive within server, additive across servers
 - Platform: Unix vs Windows config directory
 
 **[test_permissions.py](unit/test_permissions.py)** — PermissionEngine
