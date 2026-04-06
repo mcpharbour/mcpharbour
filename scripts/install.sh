@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE="mcp-harbour"
+REPO="mcpharbour/mcpharbour"
 SERVICE_NAME="mcp-harbour"
+INSTALL_DIR="${HOME}/.local/bin"
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -14,34 +14,55 @@ info()  { echo -e "${GREEN}[+]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[x]${NC} $1"; exit 1; }
 
-# ── 1. Install package ─────────────────────────────────────────────
-
-REPO="https://github.com/mcpharbour/mcpharbour.git"
-
-if command -v uv &>/dev/null; then
-    info "Installing ${PACKAGE} via uv..."
-    uv tool install "$PACKAGE" 2>/dev/null || uv tool install "git+${REPO}"
-elif command -v pipx &>/dev/null; then
-    info "Installing ${PACKAGE} via pipx..."
-    pipx install "$PACKAGE" 2>/dev/null || pipx install "git+${REPO}"
-else
-    error "Neither uv nor pipx found. Install uv first: https://docs.astral.sh/uv/getting-started/installation/"
-fi
-
-# Verify installation
-if ! command -v harbour &>/dev/null; then
-    error "'harbour' command not found after install. Check that ~/.local/bin is in your PATH."
-fi
-
-HARBOUR_BIN=$(command -v harbour)
-info "Installed harbour at ${HARBOUR_BIN}"
-
-# ── 2. Register service ────────────────────────────────────────────
+# ── 1. Detect platform ────────────────────────────────────────────
 
 OS=$(uname -s)
+ARCH=$(uname -m)
+
+case "${OS}-${ARCH}" in
+    Linux-x86_64)  PLATFORM="linux-x64" ;;
+    Darwin-arm64)  PLATFORM="darwin-arm64" ;;
+    Darwin-x86_64) PLATFORM="darwin-arm64" ;; # Rosetta
+    *) error "Unsupported platform: ${OS}-${ARCH}" ;;
+esac
+
+info "Detected platform: ${PLATFORM}"
+
+# ── 2. Download latest release ─────────────────────────────────────
+
+LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -z "$LATEST" ]; then
+    error "Could not determine latest release."
+fi
+
+info "Downloading ${LATEST}..."
+
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/mcp-harbour-${PLATFORM}.tar.gz"
+TMP_DIR=$(mktemp -d)
+trap "rm -rf ${TMP_DIR}" EXIT
+
+curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/release.tar.gz" || error "Download failed. Check https://github.com/${REPO}/releases"
+tar -xzf "${TMP_DIR}/release.tar.gz" -C "$TMP_DIR"
+
+# ── 3. Install binaries ───────────────────────────────────────────
+
+mkdir -p "$INSTALL_DIR"
+cp "${TMP_DIR}/harbour" "$INSTALL_DIR/"
+cp "${TMP_DIR}/harbour-bridge" "$INSTALL_DIR/"
+chmod +x "${INSTALL_DIR}/harbour" "${INSTALL_DIR}/harbour-bridge"
+
+# Check PATH
+if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
+    warn "${INSTALL_DIR} is not in your PATH. Add it:"
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+fi
+
+HARBOUR_BIN="${INSTALL_DIR}/harbour"
+info "Installed harbour at ${HARBOUR_BIN}"
+
+# ── 4. Register service ───────────────────────────────────────────
 
 if [ "$OS" = "Linux" ]; then
-    # systemd user service
     UNIT_DIR="${HOME}/.config/systemd/user"
     UNIT_FILE="${UNIT_DIR}/${SERVICE_NAME}.service"
 
@@ -66,17 +87,10 @@ EOF
     systemctl --user enable "$SERVICE_NAME"
     systemctl --user start "$SERVICE_NAME"
 
-    info "Registered systemd user service: ${UNIT_FILE}"
+    info "Registered systemd user service"
     info "Daemon started on 127.0.0.1:4767"
 
-    echo ""
-    info "Manage with:"
-    echo "  harbour status"
-    echo "  harbour stop"
-    echo "  harbour start"
-
 elif [ "$OS" = "Darwin" ]; then
-    # launchd user agent
     PLIST_DIR="${HOME}/Library/LaunchAgents"
     PLIST_FILE="${PLIST_DIR}/dev.mcp-harbour.daemon.plist"
 
@@ -112,18 +126,14 @@ EOF
     launchctl unload "$PLIST_FILE" 2>/dev/null || true
     launchctl load "$PLIST_FILE"
 
-    info "Registered launchd agent: ${PLIST_FILE}"
+    info "Registered launchd agent"
     info "Daemon started on 127.0.0.1:4767"
-
-    echo ""
-    info "Manage with:"
-    echo "  harbour status"
-    echo "  harbour stop"
-    echo "  harbour start"
-
-else
-    error "Unsupported OS: ${OS}. Use install.ps1 for Windows."
 fi
 
+echo ""
+info "Manage with:"
+echo "  harbour status"
+echo "  harbour stop"
+echo "  harbour start"
 echo ""
 info "Installation complete."

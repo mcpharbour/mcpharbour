@@ -5,7 +5,7 @@ description: Install MCP Harbour and start the daemon.
 
 ## One-line Install
 
-The install script installs the package, registers the daemon as a system service, and starts it automatically.
+The install script downloads pre-built binaries, registers the daemon as a system service, and starts it. No Python or package manager required.
 
 <CodeGroup>
 
@@ -28,12 +28,13 @@ This installs two commands:
 
 ## What the Install Script Does
 
-1. Installs `mcp-harbour` via `uv tool install` (or `pipx` as fallback)
-2. Registers the daemon as a system service:
+1. Downloads the latest release binaries for your platform
+2. Installs `harbour` and `harbour-bridge` to `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\mcp-harbour\bin` (Windows)
+3. Registers the daemon as a system service:
    - **Linux**: systemd user service
    - **macOS**: launchd user agent
    - **Windows**: Task Scheduler task
-3. Starts the daemon on `127.0.0.1:4767`
+4. Starts the daemon on `127.0.0.1:4767`
 
 The daemon starts on boot and restarts on crash.
 

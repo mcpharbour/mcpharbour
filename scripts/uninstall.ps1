@@ -1,6 +1,5 @@
 $ErrorActionPreference = "Stop"
 
-$Package = "mcp-harbour"
 $TaskName = "MCP Harbour Daemon"
 
 function Info($msg) { Write-Host "[+] $msg" -ForegroundColor Green }
@@ -14,17 +13,13 @@ if ($existing) {
     Info "Removed scheduled task."
 }
 
-# ── 2. Uninstall package ──────────────────────────────────────────
+# ── 2. Remove binaries ────────────────────────────────────────────
 
-$uv = Get-Command uv -ErrorAction SilentlyContinue
-$pipx = Get-Command pipx -ErrorAction SilentlyContinue
-
-if ($uv) {
-    Info "Uninstalling $Package via uv..."
-    & uv tool uninstall $Package 2>$null
-} elseif ($pipx) {
-    Info "Uninstalling $Package via pipx..."
-    & pipx uninstall $Package 2>$null
+$installDir = Join-Path $env:LOCALAPPDATA "mcp-harbour\bin"
+if (Test-Path $installDir) {
+    Remove-Item "$installDir\harbour.exe" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$installDir\harbour-bridge.exe" -Force -ErrorAction SilentlyContinue
+    Info "Removed binaries."
 }
 
 Info "Uninstall complete."

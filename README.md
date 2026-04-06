@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/mcpharbour/mcpharbour/main/scripts/
 irm https://raw.githubusercontent.com/mcpharbour/mcpharbour/main/scripts/install.ps1 | iex
 ```
 
-This installs the package, registers the daemon as a system service, and starts it.
+This downloads the binaries, registers the daemon as a system service, and starts it. No Python or package manager required.
 
 ## Quick Start
 

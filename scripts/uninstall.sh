@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SERVICE_NAME="mcp-harbour"
-PACKAGE="mcp-harbour"
+INSTALL_DIR="${HOME}/.local/bin"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,15 +33,11 @@ elif [ "$OS" = "Darwin" ]; then
     fi
 fi
 
-# ── 2. Uninstall package ──────────────────────────────────────────
+# ── 2. Remove binaries ────────────────────────────────────────────
 
-if command -v uv &>/dev/null; then
-    info "Uninstalling ${PACKAGE} via uv..."
-    uv tool uninstall "$PACKAGE" 2>/dev/null || true
-elif command -v pipx &>/dev/null; then
-    info "Uninstalling ${PACKAGE} via pipx..."
-    pipx uninstall "$PACKAGE" 2>/dev/null || true
-fi
+rm -f "${INSTALL_DIR}/harbour"
+rm -f "${INSTALL_DIR}/harbour-bridge"
+info "Removed binaries."
 
 info "Uninstall complete."
 info "Config files remain at ~/.mcp-harbour — delete manually if desired."

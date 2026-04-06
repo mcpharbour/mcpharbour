@@ -1,43 +1,51 @@
 $ErrorActionPreference = "Stop"
 
-$Package = "mcp-harbour"
+$Repo = "mcpharbour/mcpharbour"
 $TaskName = "MCP Harbour Daemon"
+$Platform = "windows-x64"
 
 function Info($msg)  { Write-Host "[+] $msg" -ForegroundColor Green }
 function Warn($msg)  { Write-Host "[!] $msg" -ForegroundColor Yellow }
 function Fail($msg)  { Write-Host "[x] $msg" -ForegroundColor Red; exit 1 }
 
-# ── 1. Install package ─────────────────────────────────────────────
+# ── 1. Download latest release ─────────────────────────────────────
 
-$uv = Get-Command uv -ErrorAction SilentlyContinue
-$pipx = Get-Command pipx -ErrorAction SilentlyContinue
+Info "Fetching latest release..."
+$release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
+$tag = $release.tag_name
+$asset = $release.assets | Where-Object { $_.name -eq "mcp-harbour-$Platform.zip" }
 
-$Repo = "https://github.com/mcpharbour/mcpharbour.git"
+if (-not $asset) { Fail "No release found for $Platform" }
 
-if ($uv) {
-    Info "Installing $Package via uv..."
-    & uv tool install $Package 2>$null
-    if ($LASTEXITCODE -ne 0) { & uv tool install "git+$Repo" }
-} elseif ($pipx) {
-    Info "Installing $Package via pipx..."
-    & pipx install $Package 2>$null
-    if ($LASTEXITCODE -ne 0) { & pipx install "git+$Repo" }
-} else {
-    Fail "Neither uv nor pipx found. Install uv first: https://docs.astral.sh/uv/getting-started/installation/"
+$tmpDir = Join-Path $env:TEMP "mcp-harbour-install"
+if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
+New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+Info "Downloading $tag..."
+Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$tmpDir\release.zip"
+Expand-Archive -Path "$tmpDir\release.zip" -DestinationPath $tmpDir -Force
+
+# ── 2. Install binaries ───────────────────────────────────────────
+
+$installDir = Join-Path $env:LOCALAPPDATA "mcp-harbour\bin"
+if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir | Out-Null }
+
+Copy-Item "$tmpDir\harbour.exe" "$installDir\" -Force
+Copy-Item "$tmpDir\harbour-bridge.exe" "$installDir\" -Force
+
+# Add to user PATH if not already there
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$installDir*") {
+    [Environment]::SetEnvironmentVariable("Path", "$installDir;$userPath", "User")
+    $env:Path = "$installDir;$env:Path"
+    Info "Added $installDir to PATH"
 }
 
-# Verify
-$harbourCmd = Get-Command harbour -ErrorAction SilentlyContinue
-if (-not $harbourCmd) {
-    Fail "'harbour' command not found after install. Ensure your Python scripts directory is in PATH."
-}
-
-$HarbourBin = $harbourCmd.Source
+$HarbourBin = Join-Path $installDir "harbour.exe"
 Info "Installed harbour at $HarbourBin"
 
-# ── 2. Register scheduled task ─────────────────────────────────────
+# ── 3. Register scheduled task ─────────────────────────────────────
 
-# Remove existing task if present
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing) {
     Warn "Removing existing scheduled task..."
@@ -66,13 +74,16 @@ Register-ScheduledTask `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
-    -Description "MCP Harbour security enforcement daemon" | Out-Null
+    -Description "MCP Harbour daemon" | Out-Null
 
-# Start the task now
 Start-ScheduledTask -TaskName $TaskName
 
 Info "Registered scheduled task: $TaskName"
 Info "Daemon started on 127.0.0.1:4767"
+
+# ── 4. Cleanup ─────────────────────────────────────────────────────
+
+Remove-Item $tmpDir -Recurse -Force
 
 Write-Host ""
 Info "Manage with:"
