@@ -9,16 +9,18 @@ Built as an implementation of the [GPARS](https://gpars.io) plane boundary — t
 **Linux / macOS:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mcpharbour/mcpharbour/main/scripts/install.sh | bash
+curl -fsSL https://github.com/mcpharbour/mcpharbour/releases/latest/download/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/mcpharbour/mcpharbour/main/scripts/install.ps1 | iex
+irm https://github.com/mcpharbour/mcpharbour/releases/latest/download/install.ps1 | iex
 ```
 
 This downloads the binaries, registers the daemon as a system service, and starts it. No Python or package manager required.
+
+Or download binaries directly from [GitHub Releases](https://github.com/mcpharbour/mcpharbour/releases).
 
 ## Quick Start
 
