@@ -12,29 +12,29 @@ Built as an implementation of the [GPARS](https://gpars.io) plane boundary.
 ## What it does
 
 <CardGroup cols={2}>
-  <Card title="Aggregation" icon="layer-group">
+  <Card title="Aggregation" icon="layer-group" color="#10b981">
     Dock multiple MCP servers and expose them as a single unified endpoint. Each agent sees one connection with tools permitted by its policy.
   </Card>
-  <Card title="Server Management" icon="server">
+  <Card title="Server Management" icon="server" color="#10b981">
     Register, start, and manage MCP server processes. Stdio servers are spawned per-agent for full isolation.
   </Card>
-  <Card title="Per-Agent Policies" icon="shield">
+  <Card title="Per-Agent Policies" icon="shield" color="#10b981">
     Define what each agent can access — which servers, which tools, which arguments. No policy means no access.
   </Card>
-  <Card title="Identity & Auth" icon="key">
+  <Card title="Identity & Auth" icon="key" color="#10b981">
     Each agent gets a token. The daemon derives identity from the token — agents cannot self-declare who they are.
   </Card>
-  <Card title="Centralized Config" icon="gear">
+  <Card title="Centralized Config" icon="gear" color="#10b981">
     One place to manage all your MCP servers, identities, and policies. No per-client configuration.
   </Card>
-  <Card title="Cross-Platform" icon="desktop">
+  <Card title="Cross-Platform" icon="desktop" color="#10b981">
     Works on Windows, macOS, and Linux. TCP transport, platform-native service management.
   </Card>
 </CardGroup>
 
 ## The problem
 
-Today, each AI agent (Claude Desktop, VS Code, Cursor) configures its own MCP servers independently. There's no shared management, no centralized policy, and no way to control what an agent can do once it has access to a server.
+Today, each AI agent (Claude Code, VS Code, Cursor, OpenCode) configures its own MCP servers independently. There's no shared management, no centralized policy, and no way to control what an agent can do once it has access to a server.
 
 ## How Harbour solves it
 

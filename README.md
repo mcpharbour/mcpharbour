@@ -36,7 +36,7 @@ harbour identity create my-agent
 harbour permit allow my-agent filesystem --tool "*" --args "path=/home/user/projects/**"
 ```
 
-Then configure your MCP client (Claude Desktop, VS Code, Cursor):
+Then configure your MCP client (Claude Code, VS Code, Cursor, OpenCode):
 
 ```json
 {

@@ -4,19 +4,17 @@
   "favicon": "/favicon.svg",
   "colors": {
     "primary": "#4a4dae",
-    "light": "#10b981",
-    "dark": "#4a4dae",
+    "light": "#6366f1",
+    "dark": "#3b3d8f",
+    "background": {
+      "dark": "#0f0f1a"
+    },
     "anchors": {
       "from": "#4a4dae",
       "to": "#10b981"
     }
   },
-  "topbarLinks": [
-    {
-      "name": "GitHub",
-      "url": "https://github.com/mcpharbour/mcpharbour"
-    }
-  ],
+  "topbarLinks": [],
   "topbarCtaButton": {
     "name": "Install",
     "url": "/getting-started/installation"
@@ -26,6 +24,11 @@
       "name": "GPARS Spec",
       "icon": "book",
       "url": "https://gpars.io"
+    },
+    {
+      "name": "GitHub",
+      "icon": "github",
+      "url": "https://github.com/mcpharbour/mcpharbour"
     }
   ],
   "navigation": [
@@ -55,6 +58,9 @@
       ]
     }
   ],
+  "appearance": {
+    "default": "dark"
+  },
   "logo": {
     "light": "/logo/light.svg",
     "dark": "/logo/dark.svg"

@@ -60,7 +60,7 @@ API key hashes are stored in the system keyring, not in config files.
 | `command` | `string` | Full launch command (stdio servers) |
 | `url` | `string` | Server URL (HTTP servers) |
 | `env` | `object` | Extra environment variables |
-| `server_type` | `"stdio"` or `"http"` | Transport type (set automatically by `harbour dock`) |
+| `server_type` | `"stdio"` or `"http"` | Transport type (inferred from `--command` or `--url`) |
 
 ### Identity Fields
 
