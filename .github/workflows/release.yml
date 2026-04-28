@@ -41,6 +41,10 @@ jobs:
       - name: Build harbour-bridge
         run: pyinstaller --onefile --name harbour-bridge mcp_harbour/bridge.py
 
+      - name: Build harbour-service (Windows)
+        if: runner.os == 'Windows'
+        run: pyinstaller --onefile --name harbour-service entry_service.py
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -57,6 +61,7 @@ jobs:
           mkdir release
           copy dist\harbour.exe release\
           copy dist\harbour-bridge.exe release\
+          copy dist\harbour-service.exe release\
           copy scripts\install.ps1 release\
           copy scripts\uninstall.ps1 release\
           Compress-Archive -Path release\* -DestinationPath mcp-harbour-${{ matrix.platform }}.zip

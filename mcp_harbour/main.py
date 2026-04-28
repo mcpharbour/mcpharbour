@@ -109,6 +109,54 @@ def serve(
     asyncio.run(gateway.serve(serve_host, serve_port))
 
 
+def _win_query_state() -> str:
+    """Return the current Windows service state string."""
+    import subprocess
+    result = subprocess.run(
+        ["sc.exe", "query", "MCPHarbour"],
+        capture_output=True, text=True
+    )
+    for token in ("RUNNING", "STOPPED", "START_PENDING", "STOP_PENDING"):
+        if token in result.stdout:
+            return token
+    return "UNKNOWN"
+
+
+def _win_sc(action: str, expect_state: str) -> str:
+    """Run sc.exe start/stop with UAC elevation fallback.
+
+    Returns: 'ok', 'already', 'denied', or 'failed'.
+    """
+    import subprocess
+    import time
+
+    state = _win_query_state()
+    if state == expect_state:
+        return "already"
+
+    result = subprocess.run(
+        ["sc.exe", action, "MCPHarbour"],
+        capture_output=True, text=True
+    )
+
+    if result.returncode != 0 and "Access is denied" in (result.stdout + result.stderr):
+        console.print("Requesting administrator permission...")
+        elevated = subprocess.run(
+            ["powershell", "-Command",
+             f'Start-Process sc.exe -ArgumentList "{action} MCPHarbour" -Verb RunAs -Wait'],
+            capture_output=True,
+        )
+        if elevated.returncode != 0:
+            return "denied"
+
+    for _ in range(10):
+        if _win_query_state() == expect_state:
+            return "ok"
+        time.sleep(1)
+
+    return "failed"
+
+
 @app.command()
 def start():
     """Start the Harbour Daemon via the platform service manager."""
@@ -121,7 +169,16 @@ def start():
         plist = f"{Path.home()}/Library/LaunchAgents/dev.mcp-harbour.daemon.plist"
         subprocess.run(["launchctl", "load", plist], check=True)
     elif sys.platform == "win32":
-        subprocess.run(["schtasks", "/Run", "/TN", "MCP Harbour Daemon"], check=True, capture_output=True)
+        result = _win_sc("start", "RUNNING")
+        if result == "already":
+            console.print("[yellow]Daemon is already running.[/yellow]")
+            return
+        elif result == "denied":
+            console.print("[bold red]Error:[/bold red] Access denied by user.")
+            raise typer.Exit(1)
+        elif result == "failed":
+            console.print("[bold red]Error:[/bold red] Failed to start daemon.")
+            raise typer.Exit(1)
     else:
         console.print("[bold red]Unsupported platform.[/bold red]")
         raise typer.Exit(1)
@@ -140,7 +197,16 @@ def stop():
         plist = f"{Path.home()}/Library/LaunchAgents/dev.mcp-harbour.daemon.plist"
         subprocess.run(["launchctl", "unload", plist], check=True)
     elif sys.platform == "win32":
-        subprocess.run(["schtasks", "/End", "/TN", "MCP Harbour Daemon"], check=True, capture_output=True)
+        result = _win_sc("stop", "STOPPED")
+        if result == "already":
+            console.print("[yellow]Daemon is already stopped.[/yellow]")
+            return
+        elif result == "denied":
+            console.print("[bold red]Error:[/bold red] Access denied by user.")
+            raise typer.Exit(1)
+        elif result == "failed":
+            console.print("[bold red]Error:[/bold red] Failed to stop daemon.")
+            raise typer.Exit(1)
     else:
         console.print("[bold red]Unsupported platform.[/bold red]")
         raise typer.Exit(1)
@@ -174,10 +240,10 @@ def status():
             console.print("[yellow]Daemon is not running.[/yellow]")
     elif sys.platform == "win32":
         result = subprocess.run(
-            ["schtasks", "/Query", "/TN", "MCP Harbour Daemon", "/FO", "LIST"],
+            ["sc", "query", "MCPHarbour"],
             capture_output=True, text=True
         )
-        if "Running" in result.stdout:
+        if "RUNNING" in result.stdout:
             console.print("[bold green]Daemon is running.[/bold green]")
         else:
             console.print("[yellow]Daemon is not running.[/yellow]")

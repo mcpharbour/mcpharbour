@@ -11,6 +11,9 @@ from .models import Config, Server, Identity, AgentPolicy, ToolPermission, Argum
 
 
 def _get_config_dir() -> Path:
+    override = os.environ.get("MCP_HARBOUR_CONFIG_DIR")
+    if override:
+        return Path(override)
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
         return base / "mcp-harbour"
