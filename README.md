@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mcpharbour/mcpharbour/releases/tag/v0.1.0"><img src="https://img.shields.io/badge/version-v0.1.0-darkgreen" alt="Version" /></a>
+  <a href="https://github.com/mcpharbour/mcpharbour/releases/tag/v0.1.1"><img src="https://img.shields.io/badge/version-v0.1.1-darkgreen" alt="Version" /></a>
   <a href="https://docs.mcpharbour.ai"><img src="https://img.shields.io/badge/docs-latest-indigo" alt="Docs" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
 </p>
