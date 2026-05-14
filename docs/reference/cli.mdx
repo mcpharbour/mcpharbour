@@ -3,7 +3,7 @@ title: harbour CLI
 description: Server administration commands.
 ---
 
-The `harbour` CLI is the admin interface for managing your MCP servers, identities, and policies. It's separate from `harbour-bridge` — agents never interact with this CLI.
+The `harbour` CLI is the admin interface for managing your MCP servers, identities, and policies. Agents connect to the daemon's Streamable HTTP MCP endpoint instead of running the admin CLI.
 
 ## Server Management
 
@@ -56,7 +56,7 @@ harbour inspect filesystem
 
 ## Daemon
 
-The daemon is the long-running process that listens for agent connections, spawns MCP server processes, and enforces policies. It's registered as a system service during installation and runs automatically.
+The daemon is the long-running process that exposes the Streamable HTTP MCP endpoint, manages docked server connections, and enforces policies. It's registered as a system service during installation and runs automatically.
 
 ### harbour start
 

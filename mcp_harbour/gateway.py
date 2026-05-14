@@ -1,30 +1,112 @@
-import json
 import logging
+import socket
 from contextlib import asynccontextmanager
 from fnmatch import fnmatch
-from typing import List, Optional, Dict, Tuple
+from http import HTTPStatus
+from typing import Dict, List, Optional
 
-import anyio
-import keyring
 import bcrypt
+import keyring
 import mcp.types as types
 from mcp.server import Server
-from mcp.types import Tool, TextContent
-from mcp.shared.message import SessionMessage
+from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import Tool
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from .config import ConfigManager
-from .process_manager import HarbourDaemon, ServerProcess
-from .permissions import PermissionEngine
 from .errors import authorization_denied, server_unavailable
-from .models import ServerType, AgentPolicy
+from .models import AgentPolicy
+from .permissions import PermissionEngine
+from .process_manager import HarbourDaemon
 
 logger = logging.getLogger("mcp_harbour")
+
+
+class HarbourAuthenticatedStreamableHTTPApp:
+    def __init__(self, gateway: "HarbourGateway", manager: StreamableHTTPSessionManager):
+        self.gateway = gateway
+        self.manager = manager
+        self._session_identities: Dict[str, str] = {}
+
+    async def __call__(self, scope, receive, send):
+        headers = {
+            key.decode("latin1").lower(): value.decode("latin1")
+            for key, value in scope.get("headers", [])
+        }
+        identity_name = self.gateway._authenticate_authorization_header(
+            headers.get("authorization")
+        )
+        if not identity_name:
+            await self._send_auth_error(scope, receive, send)
+            return
+
+        request_session_id = headers.get(MCP_SESSION_ID_HEADER)
+        if request_session_id:
+            bound_identity = self._session_identities.get(request_session_id)
+            if bound_identity and bound_identity != identity_name:
+                await self._send_auth_error(scope, receive, send)
+                return
+
+        response_session_id = None
+
+        async def send_with_session_binding(message):
+            nonlocal response_session_id
+            if message["type"] == "http.response.start":
+                response_headers = {
+                    key.decode("latin1").lower(): value.decode("latin1")
+                    for key, value in message.get("headers", [])
+                }
+                response_session_id = response_headers.get(MCP_SESSION_ID_HEADER)
+            await send(message)
+
+        scope.setdefault("state", {})["harbour_identity"] = identity_name
+        await self.manager.handle_request(scope, receive, send_with_session_binding)
+
+        if response_session_id:
+            self._session_identities[response_session_id] = identity_name
+        if scope.get("method") == "DELETE" and request_session_id:
+            self._session_identities.pop(request_session_id, None)
+
+    async def _send_auth_error(self, scope, receive, send) -> None:
+        response = JSONResponse(
+            {"error": "Unauthorized"},
+            status_code=HTTPStatus.UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        await response(scope, receive, send)
 
 
 class HarbourGateway:
     def __init__(self):
         self.config_manager = ConfigManager()
         self.daemon = HarbourDaemon()
+        self.session_server = Server("mcp-harbour")
+        self._register_handlers()
+
+    def _register_handlers(self) -> None:
+        @self.session_server.list_tools()
+        async def list_tools() -> List[Tool]:
+            return await self._list_allowed_tools(self._current_identity_name())
+
+        @self.session_server.call_tool(validate_input=False)
+        async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
+            return await self._call_tool_for_identity(
+                self._current_identity_name(), name, arguments
+            )
+
+    def _current_identity_name(self) -> str:
+        try:
+            request = self.session_server.request_context.request
+            identity_name = request.state.harbour_identity if request else None
+        except (AttributeError, LookupError):
+            identity_name = None
+        if not identity_name:
+            raise authorization_denied("Missing authenticated identity.")
+        return identity_name
 
     def _resolve_identity_from_token(self, token: str) -> Optional[str]:
         for name in self.config_manager.config.identities:
@@ -36,260 +118,147 @@ class HarbourGateway:
                 logger.error(f"Keyring error checking identity '{name}': {e}")
         return None
 
-    async def create_session(
-        self, identity_name: str
-    ) -> Tuple[Server, List[ServerProcess]]:
+    def _extract_bearer_token(self, authorization: Optional[str]) -> Optional[str]:
+        if not authorization:
+            return None
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token.strip():
+            return None
+        return token.strip()
+
+    def _authenticate_authorization_header(self, authorization: Optional[str]) -> Optional[str]:
+        token = self._extract_bearer_token(authorization)
+        if not token:
+            return None
+        self.config_manager.reload()
+        return self._resolve_identity_from_token(token)
+
+    def _load_identity_policy(self, identity_name: str) -> AgentPolicy:
         policy = self.config_manager.load_policy(identity_name)
         if not policy:
-            policy = AgentPolicy(identity_name=identity_name, permissions={})
-        engine = PermissionEngine(policy)
+            return AgentPolicy(identity_name=identity_name, permissions={})
+        return policy
 
-        session_processes: Dict[str, ServerProcess] = {}
-        owned_processes: List[ServerProcess] = []
-        tool_server_map: Dict[str, str] = {}
+    def _iter_accessible_processes(self, policy: AgentPolicy):
+        for server_name in policy.permissions:
+            process = self.daemon.get_shared_process(server_name)
+            if process and process.session:
+                yield server_name, process
 
-        for server_config in self.config_manager.list_servers():
-            server_name = server_config.name
+    async def _list_allowed_tools(self, identity_name: str) -> List[Tool]:
+        policy = self._load_identity_policy(identity_name)
+        all_tools = []
 
-            if server_name not in policy.permissions:
-                continue
-
-            if server_config.server_type == ServerType.stdio:
-                try:
-                    proc = await self.daemon.spawn_stdio_instance(server_config)
-                    session_processes[server_name] = proc
-                    owned_processes.append(proc)
-                    logger.info(
-                        f"Spawned stdio instance of '{server_name}' for identity '{identity_name}'"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Failed to spawn '{server_name}' for '{identity_name}': {e}"
-                    )
-            else:
-                shared = self.daemon.get_shared_process(server_name)
-                if shared and shared.session:
-                    session_processes[server_name] = shared
-
-        for server_name, process in session_processes.items():
-            if not process.session:
-                continue
+        for server_name, process in self._iter_accessible_processes(policy):
             try:
                 ship_tools = await process.list_tools()
                 for tool in ship_tools.tools:
-                    tool_server_map[tool.name] = server_name
+                    for perm in policy.permissions.get(server_name, []):
+                        if fnmatch(tool.name, perm.name):
+                            all_tools.append(tool)
+                            break
             except Exception as e:
                 logger.error(f"Error listing tools from {server_name}: {e}")
 
-        session_server = Server("mcp-harbour")
+        return all_tools
 
-        @session_server.list_tools()
-        async def list_tools() -> List[Tool]:
-            all_tools = []
+    async def _resolve_tool_server(self, identity_name: str, tool_name: str) -> Optional[str]:
+        policy = self._load_identity_policy(identity_name)
 
-            for server_name, process in session_processes.items():
-                if not process.session:
-                    continue
-
-                try:
-                    ship_tools = await process.list_tools()
-
-                    allowed_tools = []
-                    for tool in ship_tools.tools:
-                        for perm in policy.permissions.get(server_name, []):
-                            if fnmatch(tool.name, perm.name):
-                                allowed_tools.append(tool)
-                                break
-                    all_tools.extend(allowed_tools)
-
-                except Exception as e:
-                    logger.error(f"Error listing tools from {server_name}: {e}")
-
-            return all_tools
-
-        @session_server.call_tool()
-        async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
-            server_name = tool_server_map.get(name)
-
-            if not server_name:
-                raise authorization_denied(f"Tool '{name}' not found on any docked server.")
-
-            process = session_processes.get(server_name)
-            if not process or not process.session:
-                raise server_unavailable(server_name)
-
-            engine.check_permission(server_name, name, arguments)
-
-            logger.info(f"Routing tool '{name}' to server '{server_name}'")
+        for server_name, process in self._iter_accessible_processes(policy):
             try:
-                result = await process.call_tool(name, arguments)
-                return result
+                ship_tools = await process.list_tools()
+                for tool in ship_tools.tools:
+                    if tool.name == tool_name:
+                        return server_name
             except Exception as e:
-                if hasattr(e, 'error'):
-                    raise
-                logger.error(f"Error calling tool '{name}' on '{server_name}': {e}")
-                raise server_unavailable(server_name)
+                logger.error(f"Error listing tools from {server_name}: {e}")
 
-        return session_server, owned_processes
+        return None
+
+    async def _call_tool_for_identity(
+        self, identity_name: str, name: str, arguments: dict
+    ) -> types.CallToolResult:
+        policy = self._load_identity_policy(identity_name)
+        engine = PermissionEngine(policy)
+        server_name = await self._resolve_tool_server(identity_name, name)
+
+        if not server_name:
+            raise authorization_denied(f"Tool '{name}' not found on any docked server.")
+
+        process = self.daemon.get_shared_process(server_name)
+        if not process or not process.session:
+            raise server_unavailable(server_name)
+
+        engine.check_permission(server_name, name, arguments)
+
+        logger.info(f"Routing tool '{name}' to server '{server_name}'")
+        try:
+            result = await process.call_tool(name, arguments)
+            return result
+        except Exception as e:
+            if hasattr(e, "error"):
+                raise
+            logger.error(f"Error calling tool '{name}' on '{server_name}': {e}")
+            raise server_unavailable(server_name)
 
     async def start_shared_processes(self):
         for server in self.config_manager.list_servers():
-            if server.server_type != ServerType.stdio:
-                await self.daemon.start_shared_server(server)
-
-    async def _handle_connection(self, stream):
-        """Handle an authenticated agent connection."""
-        owned_processes = []
-        try:
-            # 1. Handshake
-            chunk = await stream.receive(4096)
-            if b"\n" not in chunk:
-                await stream.send(b'{"error": "Auth line too long"}\n')
-                return
-
-            line, remainder = chunk.split(b"\n", 1)
-
             try:
-                auth_payload = json.loads(line.decode())
-                token = auth_payload.get("auth")
-            except Exception:
-                await stream.send(b'{"error": "Invalid JSON"}\n')
-                return
+                await self.daemon.start_shared_server(server)
+            except Exception as e:
+                logger.error(f"Failed to start docked server '{server.name}': {e}")
 
-            if not token:
-                await stream.send(b'{"error": "Missing auth token"}\n')
-                return
+    def _security_settings(self, host: str, port: int) -> TransportSecuritySettings:
+        allowed_hosts = [
+            host,
+            f"{host}:{port}",
+            "127.0.0.1",
+            f"127.0.0.1:{port}",
+            "localhost",
+            f"localhost:{port}",
+        ]
+        return TransportSecuritySettings(allowed_hosts=allowed_hosts)
 
-            self.config_manager.reload()
+    def create_asgi_app(self, host: str, port: int) -> Starlette:
+        manager = StreamableHTTPSessionManager(
+            app=self.session_server,
+            json_response=False,
+            stateless=False,
+            security_settings=self._security_settings(host, port),
+        )
+        http_app = HarbourAuthenticatedStreamableHTTPApp(self, manager)
 
-            # 2. Authenticate
-            identity_name = self._resolve_identity_from_token(token)
-            if not identity_name:
-                await stream.send(b'{"error": "Invalid token"}\n')
-                return
+        @asynccontextmanager
+        async def lifespan(app):
+            async with manager.run():
+                yield
 
-            identity = self.config_manager.get_identity(identity_name)
-            logger.info(f"Authenticated connection for {identity.name}")
-
-            # 3. ACK
-            await stream.send(
-                b'{"status": "ok", "identity": "'
-                + identity.name.encode()
-                + b'"}\n'
-            )
-
-            # 4. Create Session
-            session_server, owned_processes = await self.create_session(
-                identity.name
-            )
-
-            # 5. Run Session
-            async with _mcp_streams(stream, remainder) as (
-                read_stream,
-                write_stream,
-            ):
-                await session_server.run(
-                    read_stream,
-                    write_stream,
-                    session_server.create_initialization_options(),
-                )
-
-        except Exception as e:
-            logger.error(f"Handler error: {e}")
-        finally:
-            for proc in owned_processes:
-                try:
-                    await proc.stop()
-                except Exception as e:
-                    logger.error(f"Cleanup error: {e}")
-            if owned_processes:
-                logger.info(
-                    f"Cleaned up {len(owned_processes)} per-client process(es)"
-                )
+        return Starlette(
+            routes=[Route("/mcp", endpoint=http_app, methods=["GET", "POST", "DELETE"])],
+            lifespan=lifespan,
+        )
 
     async def serve(self, host: str, port: int):
-        """Run the gateway over TCP."""
+        """Run the gateway over Streamable HTTP."""
         await self.start_shared_processes()
 
-        try:
-            listener = await anyio.create_tcp_listener(
-                local_host=host, local_port=port
-            )
-        except OSError as e:
-            if e.errno in (98, 48, 10048):  # EADDRINUSE: Linux=98, macOS=48, Windows=10048
-                logger.error(f"Port {port} is already in use. Is another harbour instance running?")
-                logger.error(f"Check with: harbour status")
-                logger.error(f"Or use a different port: harbour serve --port <port>")
-                raise SystemExit(1)
-            raise
-
-        logger.info(f"Listening on {host}:{port}")
-
-        async def handler(stream):
-            async with stream:
-                await self._handle_connection(stream)
-
-        async with listener:
-            await listener.serve(handler)
-
-
-@asynccontextmanager
-async def _mcp_streams(stream, remainder: bytes = b""):
-    """Wraps a raw AnyIO ByteStream into MCP SessionMessage streams.
-
-    If remainder is provided, it is processed first before reading from the stream.
-    This handles the case where the handshake and first MCP message arrive in the same TCP chunk.
-    """
-    from anyio.streams.text import TextReceiveStream
-
-    read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
-    write_stream, write_stream_reader = anyio.create_memory_object_stream(0)
-
-    text_stream = TextReceiveStream(stream)
-
-    async def _process_data(data: str):
-        for part in data.splitlines():
-            if not part.strip():
-                continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
-                message = types.JSONRPCMessage.model_validate_json(part)
-                await read_stream_writer.send(SessionMessage(message))
-            except Exception as exc:
-                await read_stream_writer.send(exc)
+                sock.bind((host, port))
+            except OSError as e:
+                if e.errno in (98, 48, 10048):
+                    logger.error(f"Port {port} is already in use. Is another harbour instance running?")
+                    logger.error("Check with: harbour status")
+                    logger.error("Or use a different port: harbour serve --port <port>")
+                    raise SystemExit(1)
+                raise
 
-    async def stream_reader():
-        try:
-            async with read_stream_writer:
-                # Process any remainder from the handshake first
-                if remainder:
-                    await _process_data(remainder.decode())
+        app = self.create_asgi_app(host, port)
 
-                async for line in text_stream:
-                    await _process_data(line)
-        except anyio.ClosedResourceError:
-            pass
-        except Exception as e:
-            logger.error(f"Stream Reader Error: {e}")
+        import uvicorn
 
-    async def stream_writer():
-        try:
-            async with write_stream_reader:
-                async for message in write_stream_reader:
-                    if isinstance(message, Exception):
-                        continue
-                    try:
-                        json_str = message.message.model_dump_json(
-                            by_alias=True, exclude_none=True
-                        )
-                        await stream.send(json_str.encode() + b"\n")
-                    except Exception as e:
-                        logger.error(f"Serialization Error: {e}")
-        except anyio.ClosedResourceError:
-            pass
-        except Exception as e:
-            logger.error(f"Stream Writer Error: {e}")
-
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(stream_reader)
-        tg.start_soon(stream_writer)
-        yield read_stream, write_stream
+        logger.info(f"Listening on http://{host}:{port}/mcp")
+        config = uvicorn.Config(app, host=host, port=port, log_level="info")
+        server = uvicorn.Server(config)
+        await server.serve()

@@ -1,152 +1,181 @@
-"""Tests for the daemon handshake protocol, remainder handling, and port conflict."""
+"""Tests for the Streamable HTTP transport authentication and port handling."""
 
-import json
 import socket
-import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager
+from unittest.mock import MagicMock
+
+import httpx
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
-from tests.conftest import make_mock_process, make_gateway
-
-
-# ─── Helpers ────────────────────────────────────────────────────────
+from tests.conftest import make_gateway, make_mock_process
 
 
-class MockStream:
-    def __init__(self):
-        self._inbox = asyncio.Queue()
-        self._outbox = asyncio.Queue()
-
-    async def send(self, data: bytes):
-        await self._outbox.put(data)
-
-    async def receive(self, max_bytes: int = 4096) -> bytes:
-        data = await self._inbox.get()
-        if data is None:
-            raise Exception("Stream closed")
-        return data
-
-    async def inject(self, data: bytes):
-        await self._inbox.put(data)
-
-    async def read_response(self, timeout: float = 2.0) -> bytes:
-        return await asyncio.wait_for(self._outbox.get(), timeout=timeout)
-
-    async def aclose(self):
-        pass
-
-
-def _make_handshake_gateway(config_manager, token_identity=None):
+def _make_http_gateway(config_manager, token_identity=None):
     gateway = make_gateway(config_manager)
     if token_identity is not None:
         gateway._resolve_identity_from_token = MagicMock(return_value=token_identity)
     return gateway
 
 
-# ─── Handshake Protocol ─────────────────────────────────────────────
+@asynccontextmanager
+async def _asgi_client(app, headers=None):
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:4767",
+            headers=headers or {},
+        ) as client:
+            yield client
 
 
-class TestHandshakeProtocol:
-    @pytest.mark.asyncio
-    async def test_valid_token(self, config_manager):
-        gateway = _make_handshake_gateway(config_manager, "test-agent")
-        config_manager.add_identity("test-agent")
-
-        stream = MockStream()
-        await stream.inject(b'{"auth": "harbour_sk_testtoken"}\n')
-
-        task = asyncio.create_task(gateway._handle_connection(stream))
-        ack = json.loads((await stream.read_response()).decode())
-        assert ack["status"] == "ok"
-        assert ack["identity"] == "test-agent"
-
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-    @pytest.mark.asyncio
-    async def test_invalid_token(self, config_manager):
-        gateway = _make_handshake_gateway(config_manager, None)
-
-        stream = MockStream()
-        await stream.inject(b'{"auth": "bad_token"}\n')
-        await gateway._handle_connection(stream)
-
-        assert json.loads((await stream.read_response()).decode())["error"] == "Invalid token"
-
-    @pytest.mark.asyncio
-    async def test_missing_token(self, config_manager):
-        stream = MockStream()
-        await stream.inject(b'{"something": "else"}\n')
-        await make_gateway(config_manager)._handle_connection(stream)
-
-        assert json.loads((await stream.read_response()).decode())["error"] == "Missing auth token"
-
-    @pytest.mark.asyncio
-    async def test_invalid_json(self, config_manager):
-        stream = MockStream()
-        await stream.inject(b'not json at all\n')
-        await make_gateway(config_manager)._handle_connection(stream)
-
-        assert "error" in json.loads((await stream.read_response()).decode())
-
-    @pytest.mark.asyncio
-    async def test_no_newline(self, config_manager):
-        stream = MockStream()
-        await stream.inject(b'{"auth": "token"}')
-        await make_gateway(config_manager)._handle_connection(stream)
-
-        assert "error" in json.loads((await stream.read_response()).decode())
-
-
-# ─── Remainder Handling ──────────────────────────────────────────────
-
-
-class TestRemainderHandling:
-    @pytest.mark.asyncio
-    async def test_data_after_handshake_not_lost(self, config_manager):
-        """If handshake and first MCP message arrive in the same TCP chunk, both are processed."""
-        config_manager.add_identity("test-agent")
-        config_manager.grant_permission("test-agent", "test-server", tool="*")
-
-        gateway = _make_handshake_gateway(config_manager, "test-agent")
-        gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("test-server", ["read_file"])
-        )
-
-        initialize_msg = json.dumps({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+async def _post_initialize(client: httpx.AsyncClient, headers=None):
+    return await client.post(
+        "/mcp",
+        headers=headers or {},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "test", "version": "0.1"}
-            }
-        })
-        combined = b'{"auth": "harbour_sk_testtoken"}\n' + initialize_msg.encode() + b'\n'
-
-        stream = MockStream()
-        await stream.inject(combined)
-        task = asyncio.create_task(gateway._handle_connection(stream))
-
-        ack = json.loads((await stream.read_response(timeout=3.0)).decode())
-        assert ack["status"] == "ok"
-
-        try:
-            response = json.loads((await asyncio.wait_for(stream.read_response(), timeout=3.0)).decode())
-            assert "result" in response or "error" in response
-        except asyncio.TimeoutError:
-            pytest.fail("Gateway did not respond to initialize — remainder was likely dropped")
-        finally:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+                "clientInfo": {"name": "test", "version": "0.1"},
+            },
+        },
+    )
 
 
-# ─── Port Conflict ───────────────────────────────────────────────────
+class TestHTTPAuthentication:
+    @pytest.mark.asyncio
+    async def test_missing_authorization(self, config_manager):
+        app = make_gateway(config_manager).create_asgi_app("127.0.0.1", 4767)
+        async with _asgi_client(app) as client:
+            response = await _post_initialize(client)
+
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+
+    @pytest.mark.asyncio
+    async def test_malformed_authorization(self, config_manager):
+        app = make_gateway(config_manager).create_asgi_app("127.0.0.1", 4767)
+        async with _asgi_client(app) as client:
+            response = await _post_initialize(client, {"Authorization": "Basic abc"})
+
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_invalid_token(self, config_manager):
+        gateway = _make_http_gateway(config_manager, None)
+        app = gateway.create_asgi_app("127.0.0.1", 4767)
+        async with _asgi_client(app) as client:
+            response = await _post_initialize(client, {"Authorization": "Bearer bad_token"})
+
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_valid_token_initializes_session(self, config_manager):
+        config_manager.add_identity("test-agent")
+        gateway = _make_http_gateway(config_manager, "test-agent")
+        app = gateway.create_asgi_app("127.0.0.1", 4767)
+        async with AsyncExitStack() as stack:
+            http_client = await stack.enter_async_context(_asgi_client(app, {"Authorization": "Bearer harbour_sk_test"}))
+            read, write, get_session_id = await stack.enter_async_context(
+                streamable_http_client("http://127.0.0.1:4767/mcp", http_client=http_client)
+            )
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            assert get_session_id()
+
+    @pytest.mark.asyncio
+    async def test_session_id_cannot_switch_identity(self, config_manager):
+        config_manager.add_identity("agent-one")
+        config_manager.add_identity("agent-two")
+        gateway = make_gateway(config_manager)
+        gateway._resolve_identity_from_token = MagicMock(side_effect=["agent-one", "agent-two"])
+        app = gateway.create_asgi_app("127.0.0.1", 4767)
+        async with _asgi_client(app) as client:
+            init = await _post_initialize(client, {"Authorization": "Bearer token-one"})
+            session_id = init.headers["mcp-session-id"]
+            response = await _post_initialize(
+                client,
+                {
+                    "Authorization": "Bearer token-two",
+                    "mcp-session-id": session_id,
+                },
+            )
+
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_unknown_session_id_returns_404(self, config_manager):
+        config_manager.add_identity("test-agent")
+        gateway = _make_http_gateway(config_manager, "test-agent")
+        app = gateway.create_asgi_app("127.0.0.1", 4767)
+        async with _asgi_client(app) as client:
+            response = await _post_initialize(
+                client,
+                {
+                    "Authorization": "Bearer harbour_sk_test",
+                    "mcp-session-id": "missing-session",
+                },
+            )
+
+        assert response.status_code == 404
+
+
+class TestSessionCleanup:
+    @pytest.mark.asyncio
+    async def test_delete_session_does_not_stop_shared_processes(self, config_manager):
+        config_manager.add_identity("test-agent")
+        config_manager.add_server("test-server", command="mock-server")
+        config_manager.grant_permission("test-agent", "test-server", tool="*")
+
+        proc = make_mock_process("test-server", ["read_file"])
+        gateway = _make_http_gateway(config_manager, "test-agent")
+        gateway.daemon.shared_processes["test-server"] = proc
+
+        app = gateway.create_asgi_app("127.0.0.1", 4767)
+        async with AsyncExitStack() as stack:
+            http_client = await stack.enter_async_context(_asgi_client(app, {"Authorization": "Bearer harbour_sk_test"}))
+            read, write, get_session_id = await stack.enter_async_context(
+                streamable_http_client(
+                    "http://127.0.0.1:4767/mcp",
+                    http_client=http_client,
+                    terminate_on_close=False,
+                )
+            )
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            session_id = get_session_id()
+            response = await http_client.delete("/mcp", headers={"mcp-session-id": session_id})
+            assert response.status_code == 200
+
+        proc.stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_gateway_uses_one_shared_mcp_server(self, config_manager):
+        config_manager.add_identity("test-agent")
+        gateway = _make_http_gateway(config_manager, "test-agent")
+        app = gateway.create_asgi_app("127.0.0.1", 4767)
+        shared_server = gateway.session_server
+
+        async with AsyncExitStack() as stack:
+            http_client = await stack.enter_async_context(_asgi_client(app, {"Authorization": "Bearer harbour_sk_test"}))
+            first = await stack.enter_async_context(
+                streamable_http_client("http://127.0.0.1:4767/mcp", http_client=http_client)
+            )
+            second = await stack.enter_async_context(
+                streamable_http_client("http://127.0.0.1:4767/mcp", http_client=http_client)
+            )
+            first_session = await stack.enter_async_context(ClientSession(first[0], first[1]))
+            second_session = await stack.enter_async_context(ClientSession(second[0], second[1]))
+            await first_session.initialize()
+            await second_session.initialize()
+
+        assert gateway.session_server is shared_server
 
 
 class TestPortConflict:

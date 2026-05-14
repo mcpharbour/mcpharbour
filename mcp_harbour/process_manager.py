@@ -1,6 +1,8 @@
 import os
 import logging
 from typing import Dict, Optional
+
+import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -15,6 +17,7 @@ class ServerProcess:
         self.server_config = server
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
+        self._session_lock = anyio.Lock()
 
     async def start(self):
         logger.info(f"Starting server {self.server_config.name}...")
@@ -80,12 +83,14 @@ class ServerProcess:
     async def list_tools(self):
         if not self.session:
             return []
-        return await self.session.list_tools()
+        async with self._session_lock:
+            return await self.session.list_tools()
 
     async def call_tool(self, name: str, arguments: dict):
         if not self.session:
             raise RuntimeError(f"Server {self.server_config.name} not connected")
-        return await self.session.call_tool(name, arguments)
+        async with self._session_lock:
+            return await self.session.call_tool(name, arguments)
 
 
 class HarbourDaemon:
@@ -96,11 +101,6 @@ class HarbourDaemon:
         proc = ServerProcess(server)
         await proc.start()
         self.shared_processes[server.name] = proc
-
-    async def spawn_stdio_instance(self, server: Server) -> ServerProcess:
-        proc = ServerProcess(server)
-        await proc.start()
-        return proc
 
     async def stop_shared_server(self, name: str):
         if name in self.shared_processes:

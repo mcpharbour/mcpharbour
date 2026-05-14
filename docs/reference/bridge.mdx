@@ -1,42 +1,52 @@
 ---
-title: harbour-bridge
-description: Lightweight agent bridge with no admin access.
+title: MCP Endpoint
+description: Connect MCP clients to the Harbour daemon.
 ---
 
-`harbour-bridge` is a separate entry point that connects an MCP client to the Harbour daemon. It has **no admin capabilities** — the agent cannot manage servers, identities, or policies through it.
+MCP Harbour exposes a Streamable HTTP MCP endpoint directly from the daemon. MCP clients connect to `/mcp` and authenticate with an API key in the `Authorization` header.
 
-## Usage
+## Endpoint
 
-```bash
-harbour-bridge --token harbour_sk_XXXX
-harbour-bridge --token harbour_sk_XXXX --host 192.168.1.10 --port 5000
+```text
+http://127.0.0.1:4767/mcp
 ```
 
-| Option | Required | Default | Description |
-|---|---|---|---|
-| `--token` | Yes | — | API key for authentication |
-| `--host` | No | `127.0.0.1` | Daemon host |
-| `--port` | No | `4767` | Daemon port |
+Use the host and port configured for `harbour serve` if you changed the defaults.
+
+## Authentication
+
+Every request must include a Bearer token:
+
+```http
+Authorization: Bearer harbour_sk_XXXX
+```
+
+The daemon derives the identity from the token by checking it against stored key hashes. The client does not declare its identity.
 
 ## MCP Client Configuration
 
-Configure your MCP client to use `harbour-bridge` as the server command:
+Configure your MCP client to use Harbour as a Streamable HTTP server:
 
 ```json
 {
   "mcpServers": {
     "harbour": {
-      "command": "harbour-bridge",
-      "args": ["--token", "harbour_sk_XXXX"]
+      "url": "http://127.0.0.1:4767/mcp",
+      "headers": {
+        "Authorization": "Bearer harbour_sk_XXXX"
+      }
     }
   }
 }
 ```
 
-This format works for Claude Code, VS Code, Cursor, OpenCode, and any MCP client that supports stdio servers.
+This keeps the admin CLI separate from agent access. Agents connect only to the MCP endpoint; users manage servers, identities, policies, and daemon lifecycle through the `harbour` command.
 
-## Why a Separate Entry Point?
+## HTTP Statuses
 
-The admin CLI (`harbour`) has commands to create identities, manage policies, dock servers, and control the daemon. If the agent's MCP host ran `harbour` directly, the agent would have access to all of those commands.
+| Status | Meaning |
+|---|---|
+| `401` | Missing, malformed, or invalid Bearer token |
+| `404` | Unknown MCP session id |
 
-`harbour-bridge` is intentionally minimal — stdlib only, no admin imports. It does exactly one thing: authenticate with a token and pipe MCP traffic.
+Authenticated policy denials are returned as MCP errors, not HTTP auth failures. Unauthorized tool calls return `AUTHORIZATION_DENIED` (`-31001`). Downstream server failures return `SERVER_UNAVAILABLE` (`-31002`).

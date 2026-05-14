@@ -37,8 +37,10 @@ Configure your MCP client (Claude Code, VS Code, Cursor, OpenCode):
 {
   "mcpServers": {
     "harbour": {
-      "command": "harbour-bridge",
-      "args": ["--token", "harbour_sk_..."]
+      "url": "http://127.0.0.1:4767/mcp",
+      "headers": {
+        "Authorization": "Bearer harbour_sk_..."
+      }
     }
   }
 }
@@ -50,8 +52,8 @@ The agent sees tools only from servers and tools its policy permits.
 
 ```
 Agent sends: call_tool("read_text_file", {"path": "/home/user/projects/main.py"})
-  → harbour-bridge pipes to daemon
-  → daemon verifies identity from token
+  → MCP client sends Streamable HTTP request to http://127.0.0.1:4767/mcp
+  → daemon verifies identity from the Bearer token
   → daemon checks policy: filesystem allowed, read_text_file matches *, path matches /home/user/projects/**
   → forwards to filesystem MCP server
   → returns file content to agent

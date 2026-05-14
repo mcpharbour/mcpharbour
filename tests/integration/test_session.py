@@ -1,9 +1,10 @@
-"""Tests for gateway session creation, tool listing, tool calling, and process lifecycle."""
+"""Tests for shared gateway tool listing, tool calling, and process lifecycle."""
+
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
-from mcp_harbour.models import AgentPolicy, ToolPermission, ArgumentPolicy
-from tests.conftest import make_mock_process, make_gateway, get_tools, call_tool
+
+from tests.conftest import call_tool, get_tools, make_gateway, make_mock_process
 
 
 def create_admin_policy(config_manager, servers=None):
@@ -13,39 +14,24 @@ def create_admin_policy(config_manager, servers=None):
         config_manager.grant_permission("admin", s, tool="*")
 
 
-# ─── Session Creation ────────────────────────────────────────────────
-
-
-class TestCreateSession:
+class TestSharedProcesses:
     @pytest.mark.asyncio
-    async def test_stdio_server_spawns_per_client(self, config_manager, sample_server):
-        config_manager.add_identity("admin")
-        create_admin_policy(config_manager)
-
+    async def test_stdio_server_starts_as_shared_process(self, config_manager, sample_server):
         gateway = make_gateway(config_manager)
-        mock_proc = make_mock_process("test-server", ["read_file", "write_file"])
-        gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
+        gateway.daemon.start_shared_server = AsyncMock()
 
-        session_server, owned = await gateway.create_session("admin")
+        await gateway.start_shared_processes()
 
-        gateway.daemon.spawn_stdio_instance.assert_called_once()
-        assert len(owned) == 1
-        assert owned[0] is mock_proc
+        gateway.daemon.start_shared_server.assert_awaited_once_with(sample_server)
 
     @pytest.mark.asyncio
-    async def test_http_server_reuses_shared(self, config_manager, sample_http_server):
-        config_manager.add_identity("admin")
-        config_manager.grant_permission("admin", "test-http-server", tool="*")
-
+    async def test_http_server_starts_as_shared_process(self, config_manager, sample_http_server):
         gateway = make_gateway(config_manager)
-        shared_proc = make_mock_process("test-http-server", ["search"])
-        gateway.daemon.shared_processes["test-http-server"] = shared_proc
+        gateway.daemon.start_shared_server = AsyncMock()
 
-        _, owned = await gateway.create_session("admin")
-        assert len(owned) == 0
+        await gateway.start_shared_processes()
 
-
-# ─── Tool Discovery ─────────────────────────────────────────────────
+        gateway.daemon.start_shared_server.assert_awaited_once_with(sample_http_server)
 
 
 class TestToolDiscovery:
@@ -56,12 +42,11 @@ class TestToolDiscovery:
         config_manager.grant_permission("agent", "test-server", tool="*")
 
         gateway = make_gateway(config_manager)
-        gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("test-server", ["read_file", "write_file", "list_dir"])
+        gateway.daemon.shared_processes["test-server"] = make_mock_process(
+            "test-server", ["read_file", "write_file", "list_dir"]
         )
 
-        session_server, _ = await gateway.create_session("agent")
-        tools = await get_tools(session_server)
+        tools = await get_tools(gateway.session_server)
 
         assert len(tools) == 3
         assert {t.name for t in tools} == {"read_file", "write_file", "list_dir"}
@@ -75,13 +60,14 @@ class TestToolDiscovery:
         config_manager.grant_permission("agent", "git", tool="*")
 
         gateway = make_gateway(config_manager)
-        gateway.daemon.spawn_stdio_instance = AsyncMock(side_effect=[
-            make_mock_process("test-server", ["read_file", "write_file"]),
-            make_mock_process("git", ["git_status", "git_log"]),
-        ])
+        gateway.daemon.shared_processes["test-server"] = make_mock_process(
+            "test-server", ["read_file", "write_file"]
+        )
+        gateway.daemon.shared_processes["git"] = make_mock_process(
+            "git", ["git_status", "git_log"]
+        )
 
-        session_server, _ = await gateway.create_session("agent")
-        tools = await get_tools(session_server)
+        tools = await get_tools(gateway.session_server)
 
         assert {t.name for t in tools} == {"read_file", "write_file", "git_status", "git_log"}
 
@@ -91,12 +77,11 @@ class TestToolDiscovery:
         config_manager.grant_permission("reader", "test-server", tool="read_file")
 
         gateway = make_gateway(config_manager)
-        gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("test-server", ["read_file", "write_file", "delete_file"])
+        gateway.daemon.shared_processes["test-server"] = make_mock_process(
+            "test-server", ["read_file", "write_file", "delete_file"]
         )
 
-        session_server, _ = await gateway.create_session("reader")
-        tool_names = [t.name for t in await get_tools(session_server)]
+        tool_names = [t.name for t in await get_tools(gateway.session_server, "reader")]
 
         assert "read_file" in tool_names
         assert "write_file" not in tool_names
@@ -108,12 +93,11 @@ class TestToolDiscovery:
         config_manager.grant_permission("agent", "test-server", tool="read_*")
 
         gateway = make_gateway(config_manager)
-        gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("test-server", ["read_file", "read_dir", "write_file", "delete_file"])
+        gateway.daemon.shared_processes["test-server"] = make_mock_process(
+            "test-server", ["read_file", "read_dir", "write_file", "delete_file"]
         )
 
-        session_server, _ = await gateway.create_session("agent")
-        assert {t.name for t in await get_tools(session_server)} == {"read_file", "read_dir"}
+        assert {t.name for t in await get_tools(gateway.session_server)} == {"read_file", "read_dir"}
 
     @pytest.mark.asyncio
     async def test_server_not_in_policy_skipped(self, config_manager):
@@ -123,15 +107,15 @@ class TestToolDiscovery:
         config_manager.grant_permission("agent", "test-server", tool="*")
 
         gateway = make_gateway(config_manager)
-        gateway.daemon.spawn_stdio_instance = AsyncMock(
-            return_value=make_mock_process("test-server", ["read_file"])
-        )
+        test_proc = make_mock_process("test-server", ["read_file"])
+        bash_proc = make_mock_process("bash", ["run_command"])
+        gateway.daemon.shared_processes["test-server"] = test_proc
+        gateway.daemon.shared_processes["bash"] = bash_proc
 
-        await gateway.create_session("agent")
-        assert gateway.daemon.spawn_stdio_instance.call_count == 1
+        tools = await get_tools(gateway.session_server)
 
-
-# ─── Default Deny ────────────────────────────────────────────────────
+        assert {t.name for t in tools} == {"read_file"}
+        bash_proc.list_tools.assert_not_awaited()
 
 
 class TestDefaultDeny:
@@ -141,27 +125,24 @@ class TestDefaultDeny:
         config_manager.add_identity("unknown-agent")
 
         gateway = make_gateway(config_manager)
-        gateway.daemon.spawn_stdio_instance = AsyncMock()
+        gateway.daemon.shared_processes["test-server"] = make_mock_process(
+            "test-server", ["read_file"]
+        )
 
-        session_server, _ = await gateway.create_session("unknown-agent")
-        assert len(await get_tools(session_server)) == 0
+        assert len(await get_tools(gateway.session_server, "unknown-agent")) == 0
 
     @pytest.mark.asyncio
     async def test_empty_policy(self, config_manager):
         config_manager.add_server("test-server", command="echo")
         config_manager.add_identity("empty-agent")
-        # create_policy makes an empty permissions dict
         config_manager.create_policy("empty-agent")
 
         gateway = make_gateway(config_manager)
-        gateway.daemon.spawn_stdio_instance = AsyncMock()
+        proc = make_mock_process("test-server", ["read_file"])
+        gateway.daemon.shared_processes["test-server"] = proc
 
-        session_server, _ = await gateway.create_session("empty-agent")
-        assert len(await get_tools(session_server)) == 0
-        gateway.daemon.spawn_stdio_instance.assert_not_called()
-
-
-# ─── Tool Calls ──────────────────────────────────────────────────────
+        assert len(await get_tools(gateway.session_server, "empty-agent")) == 0
+        proc.list_tools.assert_not_awaited()
 
 
 class TestToolCalls:
@@ -176,45 +157,44 @@ class TestToolCalls:
         gateway = make_gateway(config_manager)
         fs_proc = make_mock_process("test-server", ["read_file"])
         git_proc = make_mock_process("git", ["git_status"])
-        gateway.daemon.spawn_stdio_instance = AsyncMock(side_effect=[fs_proc, git_proc])
+        gateway.daemon.shared_processes["test-server"] = fs_proc
+        gateway.daemon.shared_processes["git"] = git_proc
 
-        session_server, _ = await gateway.create_session("agent")
-
-        await call_tool(session_server, "read_file", {"path": "/tmp/test"})
+        await call_tool(gateway.session_server, "read_file", {"path": "/tmp/test"})
         fs_proc.call_tool.assert_called_once_with("read_file", {"path": "/tmp/test"})
         git_proc.call_tool.assert_not_called()
 
-        await call_tool(session_server, "git_status")
+        await call_tool(gateway.session_server, "git_status")
         git_proc.call_tool.assert_called_once_with("git_status", {})
 
     @pytest.mark.asyncio
     async def test_argument_policy_allowed(self, config_manager):
         config_manager.add_server("test-server", command="echo")
         config_manager.add_identity("agent")
-        config_manager.grant_permission("agent", "test-server", tool="read_file",
-                                        arg_policies=["path=/home/user/**"])
+        config_manager.grant_permission(
+            "agent", "test-server", tool="read_file", arg_policies=["path=/home/user/**"]
+        )
 
         gateway = make_gateway(config_manager)
         mock_proc = make_mock_process("test-server", ["read_file"])
-        gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
+        gateway.daemon.shared_processes["test-server"] = mock_proc
 
-        session_server, _ = await gateway.create_session("agent")
-        await call_tool(session_server, "read_file", {"path": "/home/user/project/main.py"})
+        await call_tool(gateway.session_server, "read_file", {"path": "/home/user/project/main.py"})
         mock_proc.call_tool.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_argument_policy_denied(self, config_manager):
         config_manager.add_server("test-server", command="echo")
         config_manager.add_identity("agent")
-        config_manager.grant_permission("agent", "test-server", tool="read_file",
-                                        arg_policies=["path=/home/user/**"])
+        config_manager.grant_permission(
+            "agent", "test-server", tool="read_file", arg_policies=["path=/home/user/**"]
+        )
 
         gateway = make_gateway(config_manager)
         mock_proc = make_mock_process("test-server", ["read_file"])
-        gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
+        gateway.daemon.shared_processes["test-server"] = mock_proc
 
-        session_server, _ = await gateway.create_session("agent")
-        result = await call_tool(session_server, "read_file", {"path": "/etc/shadow"})
+        result = await call_tool(gateway.session_server, "read_file", {"path": "/etc/shadow"})
 
         assert result.root.isError is True
         mock_proc.call_tool.assert_not_called()
@@ -226,10 +206,14 @@ class TestToolCalls:
 
         gateway = make_gateway(config_manager)
         mock_proc = make_mock_process("test-server", ["read_file", "write_file"])
-        gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
+        gateway.daemon.shared_processes["test-server"] = mock_proc
 
-        session_server, _ = await gateway.create_session("readonly")
-        result = await call_tool(session_server, "write_file", {"path": "/etc/passwd", "content": "x"})
+        result = await call_tool(
+            gateway.session_server,
+            "write_file",
+            {"path": "/etc/passwd", "content": "x"},
+            "readonly",
+        )
 
         mock_proc.call_tool.assert_not_called()
         assert result.root.isError is True
@@ -243,10 +227,9 @@ class TestToolCalls:
 
         gateway = make_gateway(config_manager)
         mock_proc = make_mock_process("test-server", ["read_file"])
-        gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
+        gateway.daemon.shared_processes["test-server"] = mock_proc
 
-        session_server, _ = await gateway.create_session("agent")
-        result = await call_tool(session_server, "nonexistent_tool")
+        result = await call_tool(gateway.session_server, "nonexistent_tool")
 
         assert result.root.isError is True
         mock_proc.call_tool.assert_not_called()
@@ -260,44 +243,38 @@ class TestToolCalls:
         gateway = make_gateway(config_manager)
         mock_proc = make_mock_process("test-server", ["read_file"])
         mock_proc.session = None
-        gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
+        gateway.daemon.shared_processes["test-server"] = mock_proc
 
-        session_server, _ = await gateway.create_session("agent")
-        result = await call_tool(session_server, "read_file")
+        result = await call_tool(gateway.session_server, "read_file")
 
         assert result.root.isError is True
 
 
-# ─── Process Lifecycle ───────────────────────────────────────────────
-
-
 class TestProcessLifecycle:
     @pytest.mark.asyncio
-    async def test_owned_processes_can_be_stopped(self, config_manager, sample_server):
-        config_manager.add_identity("admin")
-        create_admin_policy(config_manager)
-
+    async def test_shared_processes_can_be_stopped(self, config_manager, sample_server):
         gateway = make_gateway(config_manager)
         mock_proc = make_mock_process("test-server", ["read_file"])
-        gateway.daemon.spawn_stdio_instance = AsyncMock(return_value=mock_proc)
+        gateway.daemon.shared_processes["test-server"] = mock_proc
 
-        _, owned = await gateway.create_session("admin")
-        for proc in owned:
-            await proc.stop()
-        mock_proc.stop.assert_called_once()
+        await gateway.daemon.stop_all_shared()
+
+        mock_proc.stop.assert_awaited_once()
+        assert "test-server" not in gateway.daemon.shared_processes
 
     @pytest.mark.asyncio
-    async def test_separate_processes_per_session(self, config_manager, sample_server):
+    async def test_multiple_identities_reuse_same_process(self, config_manager, sample_server):
         config_manager.add_identity("admin")
-        create_admin_policy(config_manager)
+        config_manager.add_identity("reader")
+        config_manager.grant_permission("admin", "test-server", tool="*")
+        config_manager.grant_permission("reader", "test-server", tool="read_file")
 
         gateway = make_gateway(config_manager)
-        proc_a = make_mock_process("test-server", ["read_file"])
-        proc_b = make_mock_process("test-server", ["read_file"])
-        gateway.daemon.spawn_stdio_instance = AsyncMock(side_effect=[proc_a, proc_b])
+        proc = make_mock_process("test-server", ["read_file", "write_file"])
+        gateway.daemon.shared_processes["test-server"] = proc
 
-        _, owned_a = await gateway.create_session("admin")
-        _, owned_b = await gateway.create_session("admin")
+        await get_tools(gateway.session_server, "admin")
+        await get_tools(gateway.session_server, "reader")
 
-        assert owned_a[0] is not owned_b[0]
-        assert gateway.daemon.spawn_stdio_instance.call_count == 2
+        assert gateway.daemon.shared_processes["test-server"] is proc
+        assert proc.list_tools.await_count == 2

@@ -48,8 +48,7 @@ tar -xzf "${TMP_DIR}/release.tar.gz" -C "$TMP_DIR"
 
 mkdir -p "$INSTALL_DIR"
 cp "${TMP_DIR}/harbour" "$INSTALL_DIR/"
-cp "${TMP_DIR}/harbour-bridge" "$INSTALL_DIR/"
-chmod +x "${INSTALL_DIR}/harbour" "${INSTALL_DIR}/harbour-bridge"
+chmod +x "${INSTALL_DIR}/harbour"
 
 # Check PATH
 if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then

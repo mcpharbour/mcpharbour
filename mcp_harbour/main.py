@@ -105,7 +105,7 @@ def serve(
     serve_port = port or DEFAULT_PORT
 
     gateway = HarbourGateway()
-    sys.stderr.write(f"Starting Harbour Daemon ({serve_host}:{serve_port})...\n")
+    sys.stderr.write(f"Starting Harbour Daemon (http://{serve_host}:{serve_port}/mcp)...\n")
     asyncio.run(gateway.serve(serve_host, serve_port))
 
 

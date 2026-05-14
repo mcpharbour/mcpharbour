@@ -38,7 +38,6 @@ if ($HarbourBinaryPath) {
 if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir | Out-Null }
 
 Copy-Item (Join-Path $sourceDir "harbour.exe") "$installDir\" -Force
-Copy-Item (Join-Path $sourceDir "harbour-bridge.exe") "$installDir\" -Force
 
 $svcDir = Join-Path $env:LOCALAPPDATA "mcp-harbour\svc"
 if (-not (Test-Path $svcDir)) { New-Item -ItemType Directory -Path $svcDir | Out-Null }

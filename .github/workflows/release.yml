@@ -38,9 +38,6 @@ jobs:
       - name: Build harbour
         run: pyinstaller --onefile --name harbour entry_harbour.py
 
-      - name: Build harbour-bridge
-        run: pyinstaller --onefile --name harbour-bridge mcp_harbour/bridge.py
-
       - name: Build harbour-service (Windows)
         if: runner.os == 'Windows'
         run: pyinstaller --onefile --name harbour-service entry_service.py
@@ -50,7 +47,6 @@ jobs:
         run: |
           mkdir -p release
           cp dist/harbour release/
-          cp dist/harbour-bridge release/
           cp scripts/install.sh release/
           cp scripts/uninstall.sh release/
           tar -czf mcp-harbour-${{ matrix.platform }}.tar.gz -C release .
@@ -60,7 +56,6 @@ jobs:
         run: |
           mkdir release
           copy dist\harbour.exe release\
-          copy dist\harbour-bridge.exe release\
           copy dist\harbour-service.exe release\
           copy scripts\install.ps1 release\
           copy scripts\uninstall.ps1 release\

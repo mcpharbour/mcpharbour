@@ -1,19 +1,24 @@
 """
-End-to-end tests that start a real daemon, connect via TCP,
-and exercise the full MCP protocol through the harbour.
+End-to-end tests that start a real daemon, connect over Streamable HTTP,
+and exercise the full MCP protocol through Harbour.
 
 Uses @modelcontextprotocol/server-everything as the downstream MCP server.
 Requires `npx` to be available.
 """
 
+import asyncio
 import json
 import socket
-import asyncio
+from contextlib import AsyncExitStack
+
+import httpx
 import pytest
 import pytest_asyncio
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
-from mcp_harbour.gateway import HarbourGateway
 from mcp_harbour.config import ConfigManager
+from mcp_harbour.gateway import HarbourGateway
 
 
 # ─── Helpers ────────────────────────────────────────────────────────
@@ -25,66 +30,41 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-class MCPClient:
-    """Minimal MCP client that speaks JSON-RPC over TCP with harbour handshake."""
-
+class MCPHTTPClient:
     def __init__(self, host: str, port: int):
-        self.host = host
-        self.port = port
-        self.reader = None
-        self.writer = None
-        self._req_id = 0
+        self.url = f"http://{host}:{port}/mcp"
+        self._stack = AsyncExitStack()
+        self._get_session_id = None
+        self.session = None
 
-    async def connect(self, token: str) -> dict:
-        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
-        self.writer.write(json.dumps({"auth": token}).encode() + b"\n")
-        await self.writer.drain()
-        ack_line = await asyncio.wait_for(self.reader.readline(), timeout=5)
-        return json.loads(ack_line.decode())
+    async def connect(self, token: str):
+        http_client = httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        )
+        await self._stack.enter_async_context(http_client)
+        read, write, get_session_id = await self._stack.enter_async_context(
+            streamable_http_client(self.url, http_client=http_client, terminate_on_close=False)
+        )
+        self._get_session_id = get_session_id
+        self.session = await self._stack.enter_async_context(ClientSession(read, write))
 
-    async def request(self, method: str, params: dict = None, timeout: float = 10) -> dict:
-        self._req_id += 1
-        msg = {"jsonrpc": "2.0", "id": self._req_id, "method": method}
-        if params is not None:
-            msg["params"] = params
-        self.writer.write(json.dumps(msg).encode() + b"\n")
-        await self.writer.drain()
-        line = await asyncio.wait_for(self.reader.readline(), timeout=timeout)
-        return json.loads(line.decode())
+    async def initialize(self):
+        result = await self.session.initialize()
+        return result
 
-    async def notify(self, method: str, params: dict = None):
-        msg = {"jsonrpc": "2.0", "method": method}
-        if params is not None:
-            msg["params"] = params
-        self.writer.write(json.dumps(msg).encode() + b"\n")
-        await self.writer.drain()
+    def session_id(self) -> str:
+        return self._get_session_id()
 
-    async def initialize(self) -> dict:
-        resp = await self.request("initialize", {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "e2e-test", "version": "0.1.0"},
-        })
-        await self.notify("notifications/initialized")
-        return resp
+    async def list_tools(self):
+        result = await self.session.list_tools()
+        return result.tools
 
-    async def list_tools(self) -> list:
-        resp = await self.request("tools/list", {})
-        return resp.get("result", {}).get("tools", [])
-
-    async def call_tool(self, name: str, arguments: dict = None) -> dict:
-        return await self.request("tools/call", {
-            "name": name,
-            "arguments": arguments or {},
-        })
+    async def call_tool(self, name: str, arguments: dict = None):
+        return await self.session.call_tool(name, arguments or {})
 
     async def close(self):
-        if self.writer:
-            self.writer.close()
-            try:
-                await self.writer.wait_closed()
-            except Exception:
-                pass
+        await self._stack.aclose()
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────
@@ -118,21 +98,20 @@ def e2e_port():
 
 @pytest.fixture
 def e2e_setup(e2e_config, e2e_dir, e2e_port):
-    # Dock server-everything using the service method
     e2e_config.add_server("everything", command="npx -y @modelcontextprotocol/server-everything")
 
-    # Create identities using the service method (generates tokens, hashes, stores in keyring)
     full_token = e2e_config.add_identity("full-access")
     restricted_token = e2e_config.add_identity("restricted")
     no_policy_token = e2e_config.add_identity("no-policy")
 
-    # Grant permissions using the service method
     e2e_config.grant_permission("full-access", "everything", tool="*")
     e2e_config.grant_permission("restricted", "everything", tool="echo")
-    e2e_config.grant_permission("restricted", "everything", tool="get-sum",
-                                arg_policies=["a=re:^\\d+$"])
-
-    # no-policy identity gets nothing — default deny
+    e2e_config.grant_permission(
+        "restricted",
+        "everything",
+        tool="get-sum",
+        arg_policies=["a=re:^\\d+$"],
+    )
 
     return {
         "config": e2e_config,
@@ -152,17 +131,17 @@ async def e2e_daemon(e2e_setup):
 
     daemon_task = asyncio.create_task(gateway.serve("127.0.0.1", port))
 
-    for _ in range(50):
-        try:
-            r, w = await asyncio.open_connection("127.0.0.1", port)
-            w.close()
-            await w.wait_closed()
-            break
-        except ConnectionRefusedError:
-            await asyncio.sleep(0.1)
-    else:
-        daemon_task.cancel()
-        pytest.fail("Daemon did not start in time")
+    async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+        for _ in range(50):
+            try:
+                response = await client.post("/mcp", json={})
+                if response.status_code == 401:
+                    break
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                await asyncio.sleep(0.1)
+        else:
+            daemon_task.cancel()
+            pytest.fail("Daemon did not start in time")
 
     yield {"port": port, **e2e_setup}
 
@@ -173,28 +152,41 @@ async def e2e_daemon(e2e_setup):
         pass
 
 
-# ─── Handshake Tests ────────────────────────────────────────────────
+# ─── Authentication Tests ────────────────────────────────────────────
 
 
-class TestE2EHandshake:
+class TestE2EAuthentication:
     @pytest.mark.asyncio
-    async def test_valid_token_connects(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+    async def test_valid_token_initializes_session(self, e2e_daemon):
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
-            ack = await client.connect(e2e_daemon["tokens"]["full-access"])
-            assert ack["status"] == "ok"
-            assert ack["identity"] == "full-access"
+            await client.connect(e2e_daemon["tokens"]["full-access"])
+            result = await client.initialize()
+
+            assert client.session_id()
+            assert result.serverInfo.name == "mcp-harbour"
         finally:
             await client.close()
 
     @pytest.mark.asyncio
     async def test_invalid_token_rejected(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
-        try:
-            ack = await client.connect("harbour_sk_bogus_token_that_doesnt_exist")
-            assert ack["error"] == "Invalid token"
-        finally:
-            await client.close()
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{e2e_daemon['port']}") as client:
+            response = await client.post(
+                "/mcp",
+                headers={"Authorization": "Bearer harbour_sk_bogus_token_that_doesnt_exist"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "e2e-test", "version": "0.1.0"},
+                    },
+                },
+            )
+
+        assert response.status_code == 401
 
 
 # ─── Initialize Tests ───────────────────────────────────────────────
@@ -203,12 +195,13 @@ class TestE2EHandshake:
 class TestE2EInitialize:
     @pytest.mark.asyncio
     async def test_initialize_returns_capabilities(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["full-access"])
-            resp = await client.initialize()
-            assert resp["result"]["serverInfo"]["name"] == "mcp-harbour"
-            assert "tools" in resp["result"]["capabilities"]
+            result = await client.initialize()
+
+            assert result.serverInfo.name == "mcp-harbour"
+            assert result.capabilities.tools is not None
         finally:
             await client.close()
 
@@ -219,12 +212,12 @@ class TestE2EInitialize:
 class TestE2EListTools:
     @pytest.mark.asyncio
     async def test_full_access_sees_all_tools(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["full-access"])
             await client.initialize()
             tools = await client.list_tools()
-            tool_names = [t["name"] for t in tools]
+            tool_names = [t.name for t in tools]
 
             assert len(tools) > 5
             assert "echo" in tool_names
@@ -235,12 +228,12 @@ class TestE2EListTools:
 
     @pytest.mark.asyncio
     async def test_restricted_sees_filtered_tools(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["restricted"])
             await client.initialize()
             tools = await client.list_tools()
-            tool_names = [t["name"] for t in tools]
+            tool_names = [t.name for t in tools]
 
             assert "echo" in tool_names
             assert "get-sum" in tool_names
@@ -251,7 +244,7 @@ class TestE2EListTools:
 
     @pytest.mark.asyncio
     async def test_no_policy_sees_no_tools(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["no-policy"])
             await client.initialize()
@@ -267,67 +260,64 @@ class TestE2EListTools:
 class TestE2ECallTool:
     @pytest.mark.asyncio
     async def test_echo_returns_input(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["full-access"])
             await client.initialize()
 
-            resp = await client.call_tool("echo", {"message": "hello harbour"})
-            result_str = json.dumps(resp["result"])
+            result = await client.call_tool("echo", {"message": "hello harbour"})
+            result_str = json.dumps(result.model_dump())
             assert "hello harbour" in result_str
         finally:
             await client.close()
 
     @pytest.mark.asyncio
     async def test_get_sum_returns_correct_result(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["full-access"])
             await client.initialize()
 
-            resp = await client.call_tool("get-sum", {"a": 7, "b": 3})
-            result_str = json.dumps(resp["result"])
+            result = await client.call_tool("get-sum", {"a": 7, "b": 3})
+            result_str = json.dumps(result.model_dump())
             assert "10" in result_str
         finally:
             await client.close()
 
     @pytest.mark.asyncio
     async def test_restricted_can_call_echo(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["restricted"])
             await client.initialize()
 
-            resp = await client.call_tool("echo", {"message": "allowed"})
-            result_str = json.dumps(resp["result"])
+            result = await client.call_tool("echo", {"message": "allowed"})
+            result_str = json.dumps(result.model_dump())
             assert "allowed" in result_str
         finally:
             await client.close()
 
     @pytest.mark.asyncio
     async def test_restricted_denied_on_unpermitted_tool(self, e2e_daemon):
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["restricted"])
             await client.initialize()
 
-            resp = await client.call_tool("get-env")
-            result = resp["result"]
-            assert result.get("isError") is True
+            result = await client.call_tool("get-env")
+            assert result.isError is True
         finally:
             await client.close()
 
     @pytest.mark.asyncio
     async def test_restricted_denied_on_argument_policy(self, e2e_daemon):
-        """get-sum with non-numeric 'a' should fail the regex policy."""
-        client = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client.connect(e2e_daemon["tokens"]["restricted"])
             await client.initialize()
 
-            resp = await client.call_tool("get-sum", {"a": "not_a_number", "b": 3})
-            result = resp["result"]
-            assert result.get("isError") is True
+            result = await client.call_tool("get-sum", {"a": "not_a_number", "b": 3})
+            assert result.isError is True
         finally:
             await client.close()
 
@@ -338,8 +328,8 @@ class TestE2ECallTool:
 class TestE2EMultipleSessions:
     @pytest.mark.asyncio
     async def test_two_clients_get_isolated_sessions(self, e2e_daemon):
-        client_a = MCPClient("127.0.0.1", e2e_daemon["port"])
-        client_b = MCPClient("127.0.0.1", e2e_daemon["port"])
+        client_a = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
+        client_b = MCPHTTPClient("127.0.0.1", e2e_daemon["port"])
         try:
             await client_a.connect(e2e_daemon["tokens"]["full-access"])
             await client_b.connect(e2e_daemon["tokens"]["restricted"])
@@ -351,10 +341,10 @@ class TestE2EMultipleSessions:
             tools_b = await client_b.list_tools()
 
             assert len(tools_a) > len(tools_b)
-            names_a = {t["name"] for t in tools_a}
-            names_b = {t["name"] for t in tools_b}
+            names_a = {t.name for t in tools_a}
+            names_b = {t.name for t in tools_b}
             assert "get-env" in names_a
             assert "get-env" not in names_b
         finally:
-            await client_a.close()
             await client_b.close()
+            await client_a.close()

@@ -19,22 +19,17 @@ irm https://mcpharbour.ai/install.ps1 | iex
 
 </CodeGroup>
 
-This installs two commands:
-
-| Command | Purpose |
-|---------|---------|
-| `harbour` | Server administration — manage servers, identities, policies, daemon |
-| `harbour-bridge` | Agent bridge — lightweight, no admin access |
+This installs the `harbour` command for server administration and starts the daemon's Streamable HTTP MCP endpoint at `http://127.0.0.1:4767/mcp`.
 
 ## What the Install Script Does
 
 1. Downloads the latest release binaries for your platform
-2. Installs `harbour` and `harbour-bridge` to `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\mcp-harbour\bin` (Windows)
+2. Installs `harbour` to `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\mcp-harbour\bin` (Windows)
 3. Registers the daemon as a system service:
    - **Linux**: systemd user service
    - **macOS**: launchd user agent
    - **Windows**: Windows Service managed by Service Control Manager
-4. Starts the daemon on `127.0.0.1:4767`
+4. Starts the daemon on `http://127.0.0.1:4767/mcp`
 
 The daemon starts on boot and restarts on crash.
 

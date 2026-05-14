@@ -9,7 +9,6 @@ install:
 # Build standalone binaries
 build:
 	python -m PyInstaller --onefile --name harbour entry_harbour.py
-	python -m PyInstaller --onefile --name harbour-bridge mcp_harbour/bridge.py
 	python -m PyInstaller --onefile --name harbour-service entry_service.py
 
 # Run all tests

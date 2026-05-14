@@ -30,25 +30,14 @@ MCP Harbour is the port authority for your MCP servers. It aggregates multiple s
     ))}
   </div>
 
-  {/* Arrow: agents → bridge */}
-  <div style={{ textAlign: 'center', margin: '6px 0', color: '#6366f1', fontSize: '12px' }}>▼ <span style={{ color: '#525280' }}>stdio</span></div>
-
-  {/* Bridge */}
-  <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '14px' }}>
-    <div style={{ background: '#1e1e3a', border: '1px dashed #6366f1', borderRadius: '8px', padding: '10px 28px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
-      <span style={{ fontWeight: 600, color: '#a5b4fc', fontSize: '14px' }}>harbour-bridge</span>
-      <span style={{ color: '#6366f1', fontSize: '12px' }}>no admin access</span>
-    </div>
-  </div>
-
-  {/* Arrow: bridge → daemon */}
-  <div style={{ textAlign: 'center', margin: '6px 0', color: '#6366f1', fontSize: '12px' }}>▼ <span style={{ color: '#525280' }}>TCP :4767</span></div>
+  {/* Arrow: agents → daemon */}
+  <div style={{ textAlign: 'center', margin: '6px 0', color: '#6366f1', fontSize: '12px' }}>▼ <span style={{ color: '#525280' }}>Streamable HTTP + Bearer token</span></div>
 
   {/* Harbour Daemon */}
   <div style={{ background: '#1a1a35', border: '2px solid #4a4dae', borderRadius: '12px', padding: '18px', margin: '10px 0' }}>
     <div style={{ textAlign: 'center', marginBottom: '14px' }}>
       <span style={{ color: '#9196d4', fontSize: '12px', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Harbour Daemon</span>
+      <span style={{ color: '#9196d4', fontSize: '12px', fontWeight: 600, letterSpacing: '0.08em'}}> /mcp</span>
     </div>
 
     {/* Auth */}
@@ -109,12 +98,10 @@ MCP Harbour is the port authority for your MCP servers. It aggregates multiple s
 
 sequenceDiagram
     participant Agent
-    participant Bridge as harbour-bridge
-    participant Daemon as ⚓ Harbour
+    participant Daemon as ⚓ Harbour /mcp
     participant Server as MCP Server
 
-    Agent->>Bridge: MCP request (stdio)
-    Bridge->>Daemon: Forward (TCP :4767)
+    Agent->>Daemon: MCP request (Streamable HTTP + Bearer token)
 
     Note over Daemon: 🔐 Verify identity
     Note over Daemon: 🛡 Check policy
@@ -122,54 +109,50 @@ sequenceDiagram
     alt ✅ Allowed
         Daemon->>Server: Forward request
         Server-->>Daemon: Response
-        Daemon-->>Bridge: Forward response
-        Bridge-->>Agent: MCP response
+        Daemon-->>Agent: MCP response
     else ❌ Denied
-        Daemon-->>Bridge: AUTHORIZATION_DENIED
-        Bridge-->>Agent: Error (-31001)
+        Daemon-->>Agent: AUTHORIZATION_DENIED (-31001)
     end
 ```
 
 ## Entry Points
 
-Two separate commands exist by design:
-
 <CardGroup cols={2}>
   <Card title="harbour" icon="terminal" color="#10b981">
     Admin CLI for the user. Manages servers, identities, policies, and the daemon. Belongs to the Action Plane.
   </Card>
-  <Card title="harbour-bridge" icon="bridge" color="#10b981">
-    Lightweight stdio bridge for agents. No admin capabilities. Belongs to the Cognitive Plane.
+  <Card title="/mcp" icon="globe" color="#10b981">
+    Streamable HTTP MCP endpoint for agents. Requires Bearer authentication and has no admin commands.
   </Card>
 </CardGroup>
 
-`harbour-bridge` has **no admin capabilities**. The agent cannot manage servers, identities, or policies through it.
+Agents connect to `/mcp`; they do not run the `harbour` admin CLI.
 
 ## Process isolation
 
 <CardGroup cols={2}>
   <Card title="Stdio servers" icon="box" color="#10b981">
-    Spawned per-client. Each agent connection gets its own server process. Full isolation between sessions.
+    Started and managed by the daemon as docked server processes.
   </Card>
   <Card title="Streamable HTTP servers" icon="globe" color="#10b981">
-    Shared across clients. The harbour connects to an already-running HTTP server.
+    Connected by the daemon as shared docked server sessions.
   </Card>
 </CardGroup>
 
 ## Connection Flow
 
 <Steps>
-  <Step title="Bridge connects">
-    `harbour-bridge` opens a TCP connection to the daemon on port 4767.
+  <Step title="Client connects">
+    The MCP client connects to `http://127.0.0.1:4767/mcp` using Streamable HTTP.
   </Step>
-  <Step title="Handshake">
-    Bridge sends `{"auth": "harbour_sk_..."}`. The daemon derives the identity by checking the token against stored hashes. The agent cannot self-declare its identity.
+  <Step title="Authentication">
+    The client sends `Authorization: Bearer harbour_sk_...`. The daemon derives the identity by checking the token against stored hashes. The agent cannot self-declare its identity.
   </Step>
-  <Step title="Session created">
-    The daemon loads the identity's policy, spawns per-client MCP server processes, and builds a tool→server cache.
+  <Step title="Request authorized">
+    The shared MCP server resolves the identity's policy and filters or routes tools through daemon-managed docked servers.
   </Step>
   <Step title="MCP traffic flows">
-    Standard JSON-RPC MCP traffic flows through the harbour. Every `call_tool` is checked against the policy before forwarding.
+    Standard MCP traffic flows through the harbour. Every `call_tool` is checked against the policy before forwarding.
   </Step>
 </Steps>
 
@@ -177,11 +160,11 @@ Two separate commands exist by design:
 
 | GPARS Concept | MCP Harbour |
 |---|---|
-| Cognitive Plane | Agent + harbour-bridge |
+| Cognitive Plane | Agent + MCP client |
 | Action Plane | MCP servers + security policies |
-| Plane Boundary | Harbour (port authority) |
+| Plane Boundary | Harbour daemon `/mcp` endpoint |
 | Security Policy | Per-identity policy files |
 | `AUTHORIZATION_DENIED` | JSON-RPC error code `-31001` |
 | `SERVER_UNAVAILABLE` | JSON-RPC error code `-31002` |
-| Identity verification | Token → identity lookup |
+| Identity verification | Bearer token → identity lookup |
 | Default deny | No policy = no access |

@@ -61,7 +61,7 @@ Identities are created with `harbour identity create <name>`. Each gets:
 - A **key prefix** for display (stored in `config.json`)
 - A **bcrypt-hashed API key** (stored in system keyring — never in config files)
 
-The agent authenticates by providing the API key via `harbour-bridge --token <key>`. The daemon derives the identity by checking the token against all stored hashes.
+The agent authenticates by sending the API key as `Authorization: Bearer <key>` to the daemon's Streamable HTTP MCP endpoint. The daemon derives the identity by checking the token against all stored hashes.
 
 <Warning>
   The agent does not declare its identity. The daemon derives it from the token. The agent cannot influence how it is identified.

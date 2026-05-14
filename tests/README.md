@@ -44,11 +44,6 @@ pytest tests/e2e        # needs npx
 - shlex split: simple, multi-arg, quoted paths, single word, uvx
 - HarbourDaemon: init, nonexistent lookup, stop all shared
 
-**[test_bridge.py](unit/test_bridge.py)** — Bridge handshake
-
-- Sends correct token over TCP
-- Exits on error response, connection refused, invalid JSON
-
 **[test_identity.py](unit/test_identity.py)** — Token resolution
 
 - Resolves correct identity from multiple
@@ -56,19 +51,19 @@ pytest tests/e2e        # needs npx
 
 ## Integration
 
-**[test_session.py](integration/test_session.py)** — Gateway sessions (mocked MCP servers)
+**[test_session.py](integration/test_session.py)** — Shared gateway server (mocked MCP servers)
 
-- Creation: stdio spawns per-client, http reuses shared
+- Shared process startup for stdio and HTTP docked servers
 - Tool discovery: single server, multiple servers, exact filter, glob filter, server filtering
 - Default deny: no policy, empty policy
 - Tool calls: correct routing, argument policy allowed/denied, denied tool, unknown tool, unavailable server
-- Lifecycle: stop owned processes, separate processes per session
+- Lifecycle: shared process shutdown and multi-identity process reuse
 
-**[test_handshake.py](integration/test_handshake.py)** — Daemon connection (mock streams)
+**[test_handshake.py](integration/test_handshake.py)** — Streamable HTTP authentication and sessions
 
-- Protocol: valid token, invalid token, missing token, invalid JSON, no newline
-- Remainder: handshake + MCP initialize in same TCP chunk
-- Port conflict: exits cleanly when port in use
+- Auth: valid token, invalid token, missing authorization, malformed authorization
+- Session binding: valid initialization, identity mismatch rejection, unknown session id
+- Port conflict: exits cleanly when port is in use
 
 ## E2E
 

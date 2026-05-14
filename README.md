@@ -56,8 +56,10 @@ Then configure your MCP client (Claude Code, VS Code, Cursor, OpenCode):
 {
   "mcpServers": {
     "harbour": {
-      "command": "harbour-bridge",
-      "args": ["--token", "harbour_sk_..."]
+      "url": "http://127.0.0.1:4767/mcp",
+      "headers": {
+        "Authorization": "Bearer harbour_sk_..."
+      }
     }
   }
 }
@@ -66,10 +68,10 @@ Then configure your MCP client (Claude Code, VS Code, Cursor, OpenCode):
 ## How It Works
 
 ```
-Agent → harbour-bridge → TCP:4767 → Harbour Daemon → MCP Servers
-              │                           │
-         no admin              identity verification
-          access               policy enforcement
+Agent → Streamable HTTP /mcp → Harbour Daemon → MCP Servers
+              │                       │
+          Bearer auth          identity verification
+                               policy enforcement
                                AUTHORIZATION_DENIED / SERVER_UNAVAILABLE
 ```
 

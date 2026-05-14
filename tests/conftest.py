@@ -1,17 +1,15 @@
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+
+from mcp.server import Server as MCPServer
+from mcp.server.lowlevel.server import request_ctx
+from mcp.shared.context import RequestContext
 from mcp.types import Tool, ListToolsResult, CallToolResult, TextContent, ListToolsRequest, CallToolRequest, CallToolRequestParams
 
-from mcp_harbour.models import (
-    Server,
-    ServerType,
-    Identity,
-    AgentPolicy,
-    ToolPermission,
-    ArgumentPolicy,
-)
-from mcp_harbour.process_manager import ServerProcess, HarbourDaemon
 from mcp_harbour.gateway import HarbourGateway
+from mcp_harbour.models import Server
+from mcp_harbour.process_manager import HarbourDaemon, ServerProcess
 
 
 def make_gateway(config_manager) -> HarbourGateway:
@@ -19,21 +17,46 @@ def make_gateway(config_manager) -> HarbourGateway:
     gateway = HarbourGateway.__new__(HarbourGateway)
     gateway.config_manager = config_manager
     gateway.daemon = HarbourDaemon()
+    gateway.session_server = MCPServer("mcp-harbour")
+    gateway._register_handlers()
     return gateway
 
 
-async def get_tools(session_server) -> list:
+def _set_request_identity(identity_name: str):
+    request = SimpleNamespace(
+        state=SimpleNamespace(harbour_identity=identity_name)
+    )
+    return request_ctx.set(
+        RequestContext(
+            request_id="test",
+            meta=None,
+            session=MagicMock(),
+            lifespan_context=None,
+            request=request,
+        )
+    )
+
+
+async def get_tools(session_server, identity_name: str = "agent") -> list:
     """Call list_tools on a session server and return the tool list."""
-    result = await session_server.request_handlers[ListToolsRequest](MagicMock())
-    return result.root.tools
+    token = _set_request_identity(identity_name)
+    try:
+        result = await session_server.request_handlers[ListToolsRequest](MagicMock())
+        return result.root.tools
+    finally:
+        request_ctx.reset(token)
 
 
-async def call_tool(session_server, name: str, arguments: dict = None):
+async def call_tool(session_server, name: str, arguments: dict = None, identity_name: str = "agent"):
     """Call a tool on a session server and return the raw handler result."""
-    handler = session_server.request_handlers[CallToolRequest]
-    request = MagicMock()
-    request.params = CallToolRequestParams(name=name, arguments=arguments or {})
-    return await handler(request)
+    token = _set_request_identity(identity_name)
+    try:
+        handler = session_server.request_handlers[CallToolRequest]
+        request = MagicMock()
+        request.params = CallToolRequestParams(name=name, arguments=arguments or {})
+        return await handler(request)
+    finally:
+        request_ctx.reset(token)
 
 
 def make_mock_process(server_name: str, tool_names: list[str]) -> ServerProcess:

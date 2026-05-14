@@ -36,7 +36,6 @@ fi
 # ── 2. Remove binaries ────────────────────────────────────────────
 
 rm -f "${INSTALL_DIR}/harbour"
-rm -f "${INSTALL_DIR}/harbour-bridge"
 info "Removed binaries."
 
 info "Uninstall complete."
