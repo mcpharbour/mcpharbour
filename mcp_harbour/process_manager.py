@@ -1,5 +1,6 @@
 import os
 import logging
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import anyio
@@ -10,6 +11,12 @@ from .models import Server, ServerType
 from contextlib import AsyncExitStack
 
 logger = logging.getLogger("mcp_harbour")
+
+
+@dataclass
+class ServerHealth:
+    state: str
+    error: Optional[str] = None
 
 
 class ServerProcess:
@@ -96,16 +103,28 @@ class ServerProcess:
 class HarbourDaemon:
     def __init__(self):
         self.shared_processes: Dict[str, ServerProcess] = {}
+        self.server_health: Dict[str, ServerHealth] = {}
 
     async def start_shared_server(self, server: Server):
         proc = ServerProcess(server)
-        await proc.start()
+        try:
+            await proc.start()
+        except Exception as exc:
+            self.shared_processes.pop(server.name, None)
+            self.server_health[server.name] = ServerHealth(
+                state="failed",
+                error=str(exc),
+            )
+            raise
+
         self.shared_processes[server.name] = proc
+        self.server_health[server.name] = ServerHealth(state="healthy")
 
     async def stop_shared_server(self, name: str):
         if name in self.shared_processes:
             await self.shared_processes[name].stop()
             del self.shared_processes[name]
+        self.server_health.pop(name, None)
 
     async def stop_all_shared(self):
         for name in list(self.shared_processes.keys()):
@@ -113,3 +132,6 @@ class HarbourDaemon:
 
     def get_shared_process(self, name: str) -> Optional[ServerProcess]:
         return self.shared_processes.get(name)
+
+    def get_server_health(self, name: str) -> Optional[ServerHealth]:
+        return self.server_health.get(name)

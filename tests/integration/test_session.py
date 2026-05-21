@@ -1,10 +1,62 @@
 """Tests for shared gateway tool listing, tool calling, and process lifecycle."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
+from mcp_harbour.process_manager import ServerHealth
 from tests.conftest import call_tool, get_tools, make_gateway, make_mock_process
+
+
+class TestHTTPDownstreamFixtures:
+    @pytest.mark.asyncio
+    async def test_http_downstream_visible_tools_are_filtered(self, setup_http_downstream, http_get_tools):
+        setup_http_downstream(
+            tool_names=["echo_http", "secret_http"],
+            allowed_tools=["echo_http"],
+        )
+
+        tools = await http_get_tools()
+
+        assert [tool.name for tool in tools] == ["echo_http"]
+
+    @pytest.mark.asyncio
+    async def test_http_downstream_allowed_call_routes_to_process(self, setup_http_downstream, http_call_tool):
+        _, fixture = setup_http_downstream(
+            tool_names=["echo_http", "secret_http"],
+            allowed_tools=["echo_http"],
+        )
+
+        result = await http_call_tool("echo_http", {"message": "hello harbour"})
+
+        assert result.root.isError is False
+        assert fixture.calls == [("echo_http", {"message": "hello harbour"})]
+        assert result.root.content[0].text == "http:hello harbour"
+
+    @pytest.mark.asyncio
+    async def test_http_downstream_denied_tool_is_not_forwarded(self, setup_http_downstream, http_call_tool):
+        _, fixture = setup_http_downstream(
+            tool_names=["echo_http", "secret_http"],
+            allowed_tools=["echo_http"],
+        )
+
+        result = await http_call_tool("secret_http")
+
+        assert result.root.isError is True
+        assert fixture.calls == []
+
+    @pytest.mark.asyncio
+    async def test_http_downstream_argument_policy_denied(self, setup_http_downstream, http_call_tool):
+        _, fixture = setup_http_downstream(
+            tool_names=["echo_http"],
+            allowed_tools=["echo_http"],
+            arg_policy_by_tool={"echo_http": ["message=re:^ok$"]},
+        )
+
+        result = await http_call_tool("echo_http", {"message": "blocked"})
+
+        assert result.root.isError is True
+        assert fixture.calls == []
 
 
 def create_admin_policy(config_manager, servers=None):
@@ -32,6 +84,41 @@ class TestSharedProcesses:
         await gateway.start_shared_processes()
 
         gateway.daemon.start_shared_server.assert_awaited_once_with(sample_http_server)
+
+    @pytest.mark.asyncio
+    async def test_failed_shared_server_does_not_block_healthy_server(self, config_manager):
+        healthy = config_manager.add_server("healthy-server", command="echo")
+        broken = config_manager.add_server("broken-server", command="bad")
+        config_manager.add_identity("agent")
+        config_manager.grant_permission("agent", "healthy-server", tool="*")
+        config_manager.grant_permission("agent", "broken-server", tool="*")
+
+        gateway = make_gateway(config_manager)
+
+        async def start_side_effect(server):
+            if server.name == "broken-server":
+                gateway.daemon.server_health[server.name] = ServerHealth("failed", "connection refused")
+                raise RuntimeError("connection refused")
+
+            gateway.daemon.shared_processes[server.name] = make_mock_process(server.name, ["read_file"])
+            gateway.daemon.server_health[server.name] = ServerHealth("healthy")
+
+        gateway.daemon.start_shared_server = AsyncMock(side_effect=start_side_effect)
+
+        await gateway.start_shared_processes()
+
+        tools = await get_tools(gateway.session_server)
+
+        assert {tool.name for tool in tools} == {"read_file"}
+        assert gateway.daemon.get_server_health("healthy-server").state == "healthy"
+        assert gateway.daemon.get_server_health("broken-server").state == "failed"
+        assert gateway.daemon.get_server_health("broken-server").error == "connection refused"
+        assert gateway.daemon.get_shared_process("healthy-server") is not None
+        assert gateway.daemon.get_shared_process("broken-server") is None
+        gateway.daemon.start_shared_server.assert_has_awaits([
+            call(healthy),
+            call(broken),
+        ], any_order=False)
 
 
 class TestToolDiscovery:

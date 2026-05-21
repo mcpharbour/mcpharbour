@@ -12,6 +12,162 @@ from mcp_harbour.models import Server
 from mcp_harbour.process_manager import HarbourDaemon, ServerProcess
 
 
+class HTTPDownstreamFixture:
+    def __init__(self, server_name: str, tool_names: list[str], result_prefix: str = "http"):
+        self.server_name = server_name
+        self.tool_names = tool_names
+        self.result_prefix = result_prefix
+        self.calls: list[tuple[str, dict]] = []
+        self.session = MagicMock()
+
+    async def list_tools(self):
+        return ListToolsResult(
+            tools=[
+                Tool(
+                    name=name,
+                    description=f"Mock {name}",
+                    inputSchema={"type": "object", "properties": {}},
+                )
+                for name in self.tool_names
+            ]
+        )
+
+    async def call_tool(self, name: str, arguments: dict):
+        payload = arguments or {}
+        self.calls.append((name, payload))
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"{self.result_prefix}:{payload.get('message', '')}")]
+        )
+
+
+@pytest.fixture
+def make_http_process():
+    def factory(server_name: str, tool_names: list[str], result_prefix: str = "http"):
+        proc = MagicMock(spec=ServerProcess)
+        proc.server_config = Server(name=server_name, url="http://localhost:3001/mcp")
+        fixture = HTTPDownstreamFixture(server_name, tool_names, result_prefix)
+        proc.session = fixture.session
+        proc.list_tools = AsyncMock(side_effect=fixture.list_tools)
+        proc.call_tool = AsyncMock(side_effect=fixture.call_tool)
+        proc.stop = AsyncMock()
+        proc.http_fixture = fixture
+        return proc
+
+    return factory
+
+
+@pytest.fixture
+def http_gateway(config_manager):
+    return make_gateway(config_manager)
+
+
+@pytest.fixture
+def attach_process(http_gateway):
+    def factory(server_name: str, process: ServerProcess):
+        http_gateway.daemon.shared_processes[server_name] = process
+        return process
+
+    return factory
+
+
+@pytest.fixture
+def http_identity(config_manager):
+    config_manager.add_identity("agent")
+    return "agent"
+
+
+@pytest.fixture
+def grant_http_permission(config_manager, http_identity):
+    def factory(server_name: str, tool: str, *, arg_policies: list[str] | None = None):
+        config_manager.grant_permission(
+            http_identity,
+            server_name,
+            tool=tool,
+            arg_policies=arg_policies,
+        )
+
+    return factory
+
+
+@pytest.fixture
+def setup_http_downstream(config_manager, http_gateway, make_http_process, attach_process, grant_http_permission):
+    def factory(
+        *,
+        server_name: str = "downstream-http",
+        tool_names: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        arg_policy_by_tool: dict[str, list[str]] | None = None,
+        result_prefix: str = "http",
+    ):
+        tool_names = tool_names or ["echo_http", "secret_http"]
+        allowed_tools = allowed_tools or [tool_names[0]]
+        arg_policy_by_tool = arg_policy_by_tool or {}
+
+        config_manager.add_server(server_name, url="http://localhost:3001/mcp")
+        process = make_http_process(server_name, tool_names, result_prefix)
+        attach_process(server_name, process)
+
+        for tool in allowed_tools:
+            grant_http_permission(
+                server_name,
+                tool,
+                arg_policies=arg_policy_by_tool.get(tool),
+            )
+
+        return http_gateway, process.http_fixture
+
+    return factory
+
+
+@pytest.fixture
+def http_get_tools(http_gateway, http_identity):
+    async def factory():
+        return await get_tools(http_gateway.session_server, http_identity)
+
+    return factory
+
+
+@pytest.fixture
+def http_call_tool(http_gateway, http_identity):
+    async def factory(name: str, arguments: dict | None = None):
+        return await call_tool(http_gateway.session_server, name, arguments, http_identity)
+
+    return factory
+
+
+@pytest.fixture
+def tmp_config_dir(tmp_path):
+    config_dir = tmp_path / ".mcp-harbour"
+    config_dir.mkdir()
+    (config_dir / "policies").mkdir()
+    return config_dir
+
+
+@pytest.fixture
+def config_manager(tmp_config_dir, monkeypatch):
+    import mcp_harbour.config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_config_dir)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_config_dir / "config.json")
+    monkeypatch.setattr(config_mod, "POLICIES_DIR", tmp_config_dir / "policies")
+    monkeypatch.setattr(config_mod, "DEFAULT_HOST", "127.0.0.1")
+    monkeypatch.setattr(config_mod, "DEFAULT_PORT", 0)
+
+    from mcp_harbour.config import ConfigManager
+
+    return ConfigManager()
+
+
+@pytest.fixture
+def sample_server(config_manager):
+    return config_manager.add_server("test-server", command="echo")
+
+
+@pytest.fixture
+def sample_http_server(config_manager):
+    return config_manager.add_server("test-http-server", url="http://localhost:3001/mcp")
+
+
 def make_gateway(config_manager) -> HarbourGateway:
     """Create a gateway with mocked internals pointing at the test config."""
     gateway = HarbourGateway.__new__(HarbourGateway)
@@ -83,38 +239,3 @@ def make_mock_process(server_name: str, tool_names: list[str]) -> ServerProcess:
     proc.stop = AsyncMock()
 
     return proc
-
-
-@pytest.fixture
-def tmp_config_dir(tmp_path):
-    config_dir = tmp_path / ".mcp-harbour"
-    config_dir.mkdir()
-    (config_dir / "policies").mkdir()
-    return config_dir
-
-
-@pytest.fixture
-def config_manager(tmp_config_dir, monkeypatch):
-    import mcp_harbour.config as config_mod
-
-    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_config_dir)
-    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_config_dir / "config.json")
-    monkeypatch.setattr(config_mod, "POLICIES_DIR", tmp_config_dir / "policies")
-    monkeypatch.setattr(config_mod, "DEFAULT_HOST", "127.0.0.1")
-    monkeypatch.setattr(config_mod, "DEFAULT_PORT", 0)
-
-    from mcp_harbour.config import ConfigManager
-
-    return ConfigManager()
-
-
-@pytest.fixture
-def sample_server(config_manager):
-    return config_manager.add_server("test-server", command="echo")
-
-
-@pytest.fixture
-def sample_http_server(config_manager):
-    return config_manager.add_server("test-http-server", url="http://localhost:3001/mcp")
-
-
