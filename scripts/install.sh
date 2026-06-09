@@ -30,18 +30,43 @@ info "Detected platform: ${PLATFORM}"
 
 # ── 2. Download latest release ─────────────────────────────────────
 
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -n "${MCP_HARBOUR_VERSION:-}" ]; then
+    LATEST="${MCP_HARBOUR_VERSION}"
+else
+    LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+fi
 if [ -z "$LATEST" ]; then
     error "Could not determine latest release."
 fi
 
 info "Downloading ${LATEST}..."
 
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/mcp-harbour-${PLATFORM}.tar.gz"
+ASSET="mcp-harbour-${PLATFORM}.tar.gz"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${ASSET}"
+CHECKSUM_URL="https://github.com/${REPO}/releases/download/${LATEST}/checksums.txt"
 TMP_DIR=$(mktemp -d)
 trap "rm -rf ${TMP_DIR}" EXIT
 
 curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/release.tar.gz" || error "Download failed. Check https://github.com/${REPO}/releases"
+
+# ── 2b. Verify checksum ────────────────────────────────────────────
+
+if curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/checksums.txt"; then
+    EXPECTED=$(grep -F "$ASSET" "${TMP_DIR}/checksums.txt" | awk '{print $1}')
+    [ -n "$EXPECTED" ] || error "checksums.txt has no entry for ${ASSET}"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL=$(sha256sum "${TMP_DIR}/release.tar.gz" | awk '{print $1}')
+    else
+        ACTUAL=$(shasum -a 256 "${TMP_DIR}/release.tar.gz" | awk '{print $1}')
+    fi
+
+    [ "$EXPECTED" = "$ACTUAL" ] || error "Checksum verification failed for ${ASSET}"
+    info "Checksum verified"
+else
+    warn "checksums.txt not available for ${LATEST}; skipping verification"
+fi
+
 tar -xzf "${TMP_DIR}/release.tar.gz" -C "$TMP_DIR"
 
 # ── 3. Install binaries ───────────────────────────────────────────

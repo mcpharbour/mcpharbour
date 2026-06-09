@@ -14,9 +14,14 @@ if ($HarbourBinaryPath) {
     $sourceDir = Split-Path -Parent (Resolve-Path $HarbourBinaryPath).Path
     Info "Copying binaries from: $sourceDir"
 } else {
-    # ── Download latest release ────────────────────────────────────
-    Info "Fetching latest release..."
-    $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
+    # ── Download release (pinned or latest) ────────────────────────
+    if ($env:MCP_HARBOUR_VERSION) {
+        Info "Fetching release $env:MCP_HARBOUR_VERSION..."
+        $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/tags/$($env:MCP_HARBOUR_VERSION)"
+    } else {
+        Info "Fetching latest release..."
+        $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
+    }
     $tag = $release.tag_name
     $asset = $release.assets | Where-Object { $_.name -eq "mcp-harbour-$Platform.zip" }
 
@@ -28,6 +33,25 @@ if ($HarbourBinaryPath) {
 
     Info "Downloading $tag..."
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$tmpDir\release.zip"
+
+    # ── Verify checksum ────────────────────────────────────────────
+    $checksumUrl = "https://github.com/$Repo/releases/download/$tag/checksums.txt"
+    $checksums = $null
+    try {
+        $checksums = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content
+    } catch {
+        Warn "checksums.txt not available for $tag; skipping verification"
+    }
+    if ($checksums) {
+        $assetName = "mcp-harbour-$Platform.zip"
+        $line = $checksums -split "`n" | Where-Object { $_ -match [regex]::Escape($assetName) } | Select-Object -First 1
+        if (-not $line) { Fail "checksums.txt has no entry for $assetName" }
+        $expected = (($line -split '\s+') | Where-Object { $_ })[0].ToLower()
+        $actual = (Get-FileHash -Algorithm SHA256 "$tmpDir\release.zip").Hash.ToLower()
+        if ($expected -ne $actual) { Fail "Checksum verification failed for $assetName" }
+        Info "Checksum verified"
+    }
+
     Expand-Archive -Path "$tmpDir\release.zip" -DestinationPath $tmpDir -Force
 
     $sourceDir = $tmpDir

@@ -4,7 +4,9 @@ from pathlib import Path
 from typing import List, Optional
 from rich.console import Console
 from rich.table import Table
+from . import __version__
 from .config import ConfigManager
+from .updater import UpdateError, run_update_installer, update_binary
 
 app = typer.Typer(help="MCP Harbour: Manage your MCP servers and permissions.")
 console = Console()
@@ -26,6 +28,49 @@ def _handle(fn, *args, **kwargs):
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise typer.Exit(code=1)
+
+
+@app.command()
+def version():
+    """Show the installed Harbour version."""
+    console.print(__version__)
+
+
+@app.command()
+def update(
+    tag: Optional[str] = typer.Option(None, help="Release tag to install (default: latest)"),
+    check: bool = typer.Option(False, "--check", help="Check for updates without installing"),
+    force: bool = typer.Option(False, "--force", help="Reinstall the selected version even if it is not newer"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Install without confirmation"),
+):
+    """Update Harbour from a GitHub release (latest by default)."""
+    try:
+        info = update_binary(tag=tag, check_only=True, force=force)
+    except UpdateError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    if check:
+        if info.update_available:
+            console.print(f"[green]Update available:[/green] {__version__} -> {info.tag}")
+        else:
+            console.print(f"[green]Harbour is up to date:[/green] {__version__}")
+        return
+
+    if not info.update_available and not force:
+        console.print(f"[green]Harbour is already up to date:[/green] {__version__}")
+        return
+
+    if not yes:
+        typer.confirm(f"Install Harbour {info.tag}?", abort=True)
+
+    try:
+        run_update_installer(info.tag)
+    except UpdateError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold green]Updated Harbour to {info.tag}.[/bold green]")
 
 
 @app.command()
