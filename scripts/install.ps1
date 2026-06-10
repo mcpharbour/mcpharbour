@@ -13,6 +13,17 @@ if ($HarbourBinaryPath) {
     # ── Local mode: copy from provided path ────────────────────────
     $sourceDir = Split-Path -Parent (Resolve-Path $HarbourBinaryPath).Path
     Info "Copying binaries from: $sourceDir"
+} elseif ($env:MCP_HARBOUR_LOCAL_ARCHIVE) {
+    # ── Local-archive mode (testing): extract a provided .zip ──────
+    if (-not (Test-Path $env:MCP_HARBOUR_LOCAL_ARCHIVE)) {
+        Fail "Local archive not found: $($env:MCP_HARBOUR_LOCAL_ARCHIVE)"
+    }
+    Info "Installing from local archive: $($env:MCP_HARBOUR_LOCAL_ARCHIVE)"
+    $tmpDir = Join-Path $env:TEMP "mcp-harbour-install"
+    if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $tmpDir | Out-Null
+    Expand-Archive -Path $env:MCP_HARBOUR_LOCAL_ARCHIVE -DestinationPath $tmpDir -Force
+    $sourceDir = $tmpDir
 } else {
     # ── Download release (pinned or latest) ────────────────────────
     if ($env:MCP_HARBOUR_VERSION) {
@@ -81,6 +92,14 @@ $ServiceBin = Join-Path $env:LOCALAPPDATA "mcp-harbour\svc\harbour-service.exe"
 Info "Installed binaries to $installDir"
 
 # ── Install and start Windows service ──────────────────────────────
+
+if ($env:MCP_HARBOUR_NO_SERVICE) {
+    Info "Skipping service registration (MCP_HARBOUR_NO_SERVICE set)."
+    Info "Run the daemon manually with: harbour serve"
+    Write-Host ""
+    Info "Installation complete."
+    exit 0
+}
 
 $logDir = Join-Path $env:APPDATA "mcp-harbour"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }

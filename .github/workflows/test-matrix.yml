@@ -1,0 +1,110 @@
+name: Test Matrix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # L0 — static lint of the workflow definitions themselves.
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+  # L1 + L2 — unit and integration suite on every OS.
+  pytest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Test process runs under this Python (keyrings.alt installed), so a file
+      # backend avoids any need for a headless system keyring.
+      PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]" keyrings.alt
+      - name: Run unit + integration tests
+        run: python -m pytest tests/unit tests/integration -q
+
+  # L3 — npx-backed end-to-end protocol test. Node/npx ships on the GitHub
+  # ubuntu runner; this is the one place the real downstream server is used.
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install
+        run: pip install -e ".[dev]" keyrings.alt
+      - name: Run e2e tests
+        run: python -m pytest tests/e2e -q
+
+  # L4 — reusable binary build.
+  build:
+    uses: ./.github/workflows/build.yml
+
+  # L5 — run the usability scenario against the frozen binary (foreground serve).
+  binary-smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-latest
+            platform: darwin-arm64
+          - os: windows-latest
+            platform: windows-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      # The frozen binary bundles keyrings.alt; this selects the file backend
+      # so identity creation works headless on every OS.
+      PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # scenario.py + the docked downstream run under this Python (not the
+      # frozen binary), so they need mcp + httpx.
+      - name: Install scenario deps
+        run: pip install -e ".[dev]"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-harbour-${{ matrix.platform }}
+      - name: Extract binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          tar -xzf mcp-harbour-${{ matrix.platform }}.tar.gz
+          chmod +x harbour
+      - name: Extract binary (Windows)
+        if: runner.os == 'Windows'
+        run: Expand-Archive -Path mcp-harbour-${{ matrix.platform }}.zip -DestinationPath .
+      - name: Run scenario (Unix)
+        if: runner.os != 'Windows'
+        run: python tests/smoke/scenario.py serve-check --harbour ./harbour
+      - name: Run scenario (Windows)
+        if: runner.os == 'Windows'
+        run: python tests/smoke/scenario.py serve-check --harbour .\harbour.exe

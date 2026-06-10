@@ -28,43 +28,51 @@ esac
 
 info "Detected platform: ${PLATFORM}"
 
-# ── 2. Download latest release ─────────────────────────────────────
-
-if [ -n "${MCP_HARBOUR_VERSION:-}" ]; then
-    LATEST="${MCP_HARBOUR_VERSION}"
-else
-    LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-fi
-if [ -z "$LATEST" ]; then
-    error "Could not determine latest release."
-fi
-
-info "Downloading ${LATEST}..."
+# ── 2. Obtain release archive (download, or use a local one) ───────
 
 ASSET="mcp-harbour-${PLATFORM}.tar.gz"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${ASSET}"
-CHECKSUM_URL="https://github.com/${REPO}/releases/download/${LATEST}/checksums.txt"
 TMP_DIR=$(mktemp -d)
 trap "rm -rf ${TMP_DIR}" EXIT
 
-curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/release.tar.gz" || error "Download failed. Check https://github.com/${REPO}/releases"
-
-# ── 2b. Verify checksum ────────────────────────────────────────────
-
-if curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/checksums.txt"; then
-    EXPECTED=$(grep -F "$ASSET" "${TMP_DIR}/checksums.txt" | awk '{print $1}')
-    [ -n "$EXPECTED" ] || error "checksums.txt has no entry for ${ASSET}"
-
-    if command -v sha256sum >/dev/null 2>&1; then
-        ACTUAL=$(sha256sum "${TMP_DIR}/release.tar.gz" | awk '{print $1}')
+if [ -n "${MCP_HARBOUR_LOCAL_ARCHIVE:-}" ]; then
+    # Local-file mode (used for testing): install from a provided archive,
+    # no download and no checksum lookup.
+    [ -f "$MCP_HARBOUR_LOCAL_ARCHIVE" ] || error "Local archive not found: ${MCP_HARBOUR_LOCAL_ARCHIVE}"
+    info "Installing from local archive: ${MCP_HARBOUR_LOCAL_ARCHIVE}"
+    cp "$MCP_HARBOUR_LOCAL_ARCHIVE" "${TMP_DIR}/release.tar.gz"
+else
+    if [ -n "${MCP_HARBOUR_VERSION:-}" ]; then
+        LATEST="${MCP_HARBOUR_VERSION}"
     else
-        ACTUAL=$(shasum -a 256 "${TMP_DIR}/release.tar.gz" | awk '{print $1}')
+        LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    if [ -z "$LATEST" ]; then
+        error "Could not determine latest release."
     fi
 
-    [ "$EXPECTED" = "$ACTUAL" ] || error "Checksum verification failed for ${ASSET}"
-    info "Checksum verified"
-else
-    warn "checksums.txt not available for ${LATEST}; skipping verification"
+    info "Downloading ${LATEST}..."
+
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${ASSET}"
+    CHECKSUM_URL="https://github.com/${REPO}/releases/download/${LATEST}/checksums.txt"
+
+    curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/release.tar.gz" || error "Download failed. Check https://github.com/${REPO}/releases"
+
+    # ── 2b. Verify checksum ────────────────────────────────────────
+    if curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/checksums.txt"; then
+        EXPECTED=$(grep -F "$ASSET" "${TMP_DIR}/checksums.txt" | awk '{print $1}')
+        [ -n "$EXPECTED" ] || error "checksums.txt has no entry for ${ASSET}"
+
+        if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL=$(sha256sum "${TMP_DIR}/release.tar.gz" | awk '{print $1}')
+        else
+            ACTUAL=$(shasum -a 256 "${TMP_DIR}/release.tar.gz" | awk '{print $1}')
+        fi
+
+        [ "$EXPECTED" = "$ACTUAL" ] || error "Checksum verification failed for ${ASSET}"
+        info "Checksum verified"
+    else
+        warn "checksums.txt not available for ${LATEST}; skipping verification"
+    fi
 fi
 
 tar -xzf "${TMP_DIR}/release.tar.gz" -C "$TMP_DIR"
@@ -85,6 +93,14 @@ HARBOUR_BIN="${INSTALL_DIR}/harbour"
 info "Installed harbour at ${HARBOUR_BIN}"
 
 # ── 4. Register service ───────────────────────────────────────────
+
+if [ -n "${MCP_HARBOUR_NO_SERVICE:-}" ]; then
+    info "Skipping service registration (MCP_HARBOUR_NO_SERVICE set)."
+    info "Run the daemon manually with: harbour serve"
+    echo ""
+    info "Installation complete."
+    exit 0
+fi
 
 if [ "$OS" = "Linux" ]; then
     UNIT_DIR="${HOME}/.config/systemd/user"

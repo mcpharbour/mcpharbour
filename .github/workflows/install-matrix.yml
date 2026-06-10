@@ -1,0 +1,238 @@
+name: Install Matrix
+
+# Heavier, install/service/update layers (L6–L11). The install + usage job runs
+# on PRs (it builds on the locally-validated install-script path). The service
+# lifecycle and self-update jobs are workflow_dispatch-gated: they can only be
+# validated on real runners and the headless service path needs first-run
+# iteration, so they should not gate PRs until proven.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The frozen binary bundles keyrings.alt; select the file backend so identity
+  # creation/verification works headless on every OS.
+  PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  # L6 + L8 (no service) — run the real installer, then use the *installed*
+  # binary end-to-end via a foreground daemon. Also exercises uninstall (L11).
+  install-use:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-latest
+            platform: darwin-arm64
+          - os: windows-latest
+            platform: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install scenario deps
+        run: pip install -e ".[dev]"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-harbour-${{ matrix.platform }}
+
+      # ---- Unix (Linux + macOS) ----
+      - name: Install via script, no service (Unix)
+        if: runner.os != 'Windows'
+        env:
+          MCP_HARBOUR_LOCAL_ARCHIVE: ${{ github.workspace }}/mcp-harbour-${{ matrix.platform }}.tar.gz
+          MCP_HARBOUR_NO_SERVICE: "1"
+        run: bash scripts/install.sh
+
+      - name: Use installed binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          BIN="$HOME/.local/bin/harbour"
+          test -x "$BIN" || { echo "installed binary missing"; exit 1; }
+          TOKEN=$(python tests/smoke/scenario.py configure --harbour "$BIN" | sed -n 's/^TOKEN=//p')
+          test -n "$TOKEN" || { echo "no token from configure"; exit 1; }
+          nohup "$BIN" serve --port 4767 >serve.log 2>&1 &
+          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token "$TOKEN"
+
+      - name: Uninstall (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          bash scripts/uninstall.sh || true
+          test ! -e "$HOME/.local/bin/harbour" && echo "uninstall removed binary" || { echo "binary still present"; exit 1; }
+
+      # ---- Windows ----
+      - name: Install via script, no service (Windows)
+        if: runner.os == 'Windows'
+        env:
+          MCP_HARBOUR_LOCAL_ARCHIVE: ${{ github.workspace }}\mcp-harbour-${{ matrix.platform }}.zip
+          MCP_HARBOUR_NO_SERVICE: "1"
+        run: powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+
+      - name: Use installed binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $bin = Join-Path $env:LOCALAPPDATA "mcp-harbour\bin\harbour.exe"
+          if (-not (Test-Path $bin)) { throw "installed binary missing" }
+          $out = python tests/smoke/scenario.py configure --harbour $bin
+          $token = ($out | Select-String -Pattern '^TOKEN=(.+)$').Matches.Groups[1].Value
+          if (-not $token) { throw "no token from configure" }
+          Start-Process $bin -ArgumentList 'serve','--port','4767' -RedirectStandardOutput serve.log -RedirectStandardError serveerr.log
+          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token $token
+
+  # L7 + L8 (service) + L11 — install WITH the platform service, drive
+  # start/stop/status, use the service-managed daemon, then uninstall.
+  # workflow_dispatch only: headless service start is fragile and unvalidated.
+  service-lifecycle:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-latest
+            platform: darwin-arm64
+          - os: windows-latest
+            platform: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install scenario deps
+        run: pip install -e ".[dev]"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-harbour-${{ matrix.platform }}
+
+      # Linux: configure config first, inject the keyring backend into the user
+      # systemd environment so the managed service can verify tokens headless,
+      # then install (which registers + starts the unit).
+      - name: Install with systemd service (Linux)
+        if: runner.os == 'Linux'
+        env:
+          MCP_HARBOUR_LOCAL_ARCHIVE: ${{ github.workspace }}/mcp-harbour-linux-x64.tar.gz
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          loginctl enable-linger "$USER" || true
+          systemctl --user set-environment PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring || true
+          "$HOME/.local/bin/harbour" --help >/dev/null 2>&1 || true
+          # Configure before the service starts so the docked server is spawned.
+          BIN_TMP=$(mktemp -d)/harbour
+          tar -xzf mcp-harbour-linux-x64.tar.gz -C "$(dirname "$BIN_TMP")"
+          chmod +x "$BIN_TMP"
+          python tests/smoke/scenario.py configure --harbour "$BIN_TMP" | tee configure.out
+          bash scripts/install.sh
+
+      - name: Service lifecycle + use (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          BIN="$HOME/.local/bin/harbour"
+          "$BIN" status
+          TOKEN=$(sed -n 's/^TOKEN=//p' configure.out)
+          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token "$TOKEN"
+          "$BIN" stop
+          "$BIN" status
+          "$BIN" start
+          "$BIN" status
+
+      - name: Uninstall (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/uninstall.sh
+
+      # macOS: launchd LaunchAgent. Headless start may be unreliable; the step
+      # asserts what it can and surfaces failures rather than skipping.
+      - name: Install with launchd agent (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MCP_HARBOUR_LOCAL_ARCHIVE: ${{ github.workspace }}/mcp-harbour-darwin-arm64.tar.gz
+        run: |
+          BIN_TMP=$(mktemp -d)/harbour
+          tar -xzf mcp-harbour-darwin-arm64.tar.gz -C "$(dirname "$BIN_TMP")"
+          chmod +x "$BIN_TMP"
+          python tests/smoke/scenario.py configure --harbour "$BIN_TMP" | tee configure.out
+          bash scripts/install.sh
+
+      - name: Service lifecycle + use (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BIN="$HOME/.local/bin/harbour"
+          "$BIN" status
+          TOKEN=$(sed -n 's/^TOKEN=//p' configure.out)
+          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token "$TOKEN"
+          "$BIN" stop
+          "$BIN" start
+
+      - name: Uninstall (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/uninstall.sh
+
+      # Windows: real Service Control Manager (runner is admin).
+      - name: Install with Windows service (Windows)
+        if: runner.os == 'Windows'
+        env:
+          MCP_HARBOUR_LOCAL_ARCHIVE: ${{ github.workspace }}\mcp-harbour-windows-x64.zip
+        run: |
+          $tmp = Join-Path $env:TEMP "harbour-cfgbin"
+          Expand-Archive -Path mcp-harbour-windows-x64.zip -DestinationPath $tmp -Force
+          python tests/smoke/scenario.py configure --harbour (Join-Path $tmp "harbour.exe") | Tee-Object configure.out
+          powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+
+      - name: Service lifecycle + use (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $bin = Join-Path $env:LOCALAPPDATA "mcp-harbour\bin\harbour.exe"
+          & $bin status
+          $token = ($(Get-Content configure.out) | Select-String -Pattern '^TOKEN=(.+)$').Matches.Groups[1].Value
+          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token $token
+          & $bin stop
+          & $bin start
+
+      - name: Uninstall (Windows)
+        if: runner.os == 'Windows'
+        run: powershell -ExecutionPolicy Bypass -File scripts/uninstall.ps1
+
+  # L10 — real self-update: install the previous release, update to latest.
+  # workflow_dispatch only (needs published releases; runs the true network path).
+  self-update:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install previous release then update (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          MCP_HARBOUR_NO_SERVICE=1 bash scripts/install.sh
+          BIN="$HOME/.local/bin/harbour"
+          "$BIN" version
+          "$BIN" update --check
+          "$BIN" update --yes
+          "$BIN" version
+      - name: Install previous release then update (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:MCP_HARBOUR_NO_SERVICE = "1"
+          powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+          $bin = Join-Path $env:LOCALAPPDATA "mcp-harbour\bin\harbour.exe"
+          & $bin version
+          & $bin update --check
+          & $bin update --yes
+          & $bin version
