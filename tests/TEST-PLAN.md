@@ -317,6 +317,23 @@ Status: **GAP**.
 
 ---
 
+## Reporting — Allure 3
+
+Results are visualized with Allure 3. `allure-pytest` (a dev dependency) makes
+the unit/integration/e2e suites emit Allure results via `--alluredir`, and the
+smoke scenario emits its own Allure result file (each check becomes a step) when
+run with `--alluredir`. In CI, every result-producing job uploads its
+`allure-results-*` artifact; the `report` job in `test-matrix.yml` aggregates
+them, runs `allure generate` (config in `allurerc.mjs`), and deploys the report
+to **GitHub Pages** on `main` pushes. Trend history is persisted via an
+`actions/cache` of `history.jsonl`.
+
+Setup note: **GitHub Pages must be enabled** (Settings → Pages → Source: GitHub
+Actions) for the `report` job to publish; otherwise it fails at deploy.
+
+Locally: `make allure` (suite + scenario → report) or `make allure-serve` (live
+server). Needs the Allure 3 CLI: `npm install -g allure`.
+
 ## Closed in this round
 
 - **`scenario.py` attach mode** (`configure` / `check` subcommands) — *done,

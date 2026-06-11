@@ -18,6 +18,7 @@ Exit code 0 = all checks passed, 1 = a check failed or setup errored.
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from contextlib import AsyncExitStack
 from pathlib import Path
 from urllib.parse import urlparse
@@ -77,16 +79,54 @@ def wait_ready(url: str, timeout: float = 40.0) -> bool:
     return False
 
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
 class Checks:
     def __init__(self) -> None:
-        self.results: list[tuple[bool, str]] = []
+        self.start_ms = _now_ms()
+        self.results: list[tuple[bool, str, int]] = []
 
     def check(self, ok: bool, label: str) -> None:
-        self.results.append((bool(ok), label))
+        self.results.append((bool(ok), label, _now_ms()))
         print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
 
     def ok(self) -> bool:
-        return bool(self.results) and all(ok for ok, _ in self.results)
+        return bool(self.results) and all(ok for ok, _, _ in self.results)
+
+
+def write_allure(checks: Checks, alluredir: str, name: str) -> None:
+    """Emit an Allure result file (allure2 format, read by Allure 3) mapping
+    each check to a step, so the standalone scenario appears in the report."""
+    Path(alluredir).mkdir(parents=True, exist_ok=True)
+    steps, prev, failed = [], checks.start_ms, None
+    for ok, label, ts in checks.results:
+        steps.append({"name": label, "status": "passed" if ok else "failed",
+                      "stage": "finished", "start": prev, "stop": ts})
+        if not ok and failed is None:
+            failed = label
+        prev = ts
+    stop = checks.results[-1][2] if checks.results else checks.start_ms
+    result = {
+        "uuid": uuid.uuid4().hex,
+        "historyId": hashlib.md5(name.encode()).hexdigest(),
+        "name": name,
+        "fullName": f"smoke.scenario::{name}",
+        "status": "passed" if checks.ok() else "failed",
+        "stage": "finished",
+        "start": checks.start_ms,
+        "stop": stop,
+        "steps": steps,
+        "labels": [
+            {"name": "suite", "value": "Smoke scenario"},
+            {"name": "framework", "value": "harbour-scenario"},
+            {"name": "language", "value": "python"},
+        ],
+    }
+    if failed:
+        result["statusDetails"] = {"message": f"check failed: {failed}"}
+    (Path(alluredir) / f"{result['uuid']}-result.json").write_text(json.dumps(result))
 
 
 def downstream_command() -> str:
@@ -169,7 +209,10 @@ def check_unauthenticated(url: str, checks: Checks) -> None:
         checks.check(False, f"unauthenticated request rejected (transport error: {e})")
 
 
-def finish(checks: Checks) -> int:
+def finish(checks: Checks, args=None, name: str = "MCP Harbour scenario") -> int:
+    alluredir = getattr(args, "alluredir", None) if args else None
+    if alluredir:
+        write_allure(checks, alluredir, getattr(args, "allure_name", None) or name)
     print()
     if checks.ok():
         print("SCENARIO PASSED")
@@ -207,7 +250,7 @@ def cmd_serve_check(args) -> int:
             except subprocess.TimeoutExpired:
                 daemon.kill()
                 daemon.communicate()
-    return finish(checks)
+    return finish(checks, args, "serve-check")
 
 
 def cmd_configure(args) -> int:
@@ -215,8 +258,10 @@ def cmd_configure(args) -> int:
     checks = Checks()
     env = dict(os.environ)  # ambient config dir (installed default or override)
     token = setup_config(harbour, env, checks)
+    if getattr(args, "alluredir", None):
+        write_allure(checks, args.alluredir, getattr(args, "allure_name", None) or "configure")
     if not checks.ok():
-        finish(checks)
+        print("SCENARIO FAILED")
         return 1
     print(f"TOKEN={token}")
     return 0
@@ -230,7 +275,12 @@ def cmd_check(args) -> int:
         return 1
     check_unauthenticated(base, checks)
     asyncio.run(run_client_checks(args.url, args.token, checks))
-    return finish(checks)
+    return finish(checks, args, "check")
+
+
+def _add_allure_args(p) -> None:
+    p.add_argument("--alluredir", help="write an Allure result file into this dir")
+    p.add_argument("--allure-name", dest="allure_name", help="name for the Allure result")
 
 
 def main() -> int:
@@ -239,22 +289,29 @@ def main() -> int:
 
     sc = sub.add_parser("serve-check", help="self-contained serve + assert (L5)")
     sc.add_argument("--harbour")
+    _add_allure_args(sc)
     sc.set_defaults(func=cmd_serve_check)
 
     cf = sub.add_parser("configure", help="write config into ambient config dir, print TOKEN (L8)")
     cf.add_argument("--harbour")
+    _add_allure_args(cf)
     cf.set_defaults(func=cmd_configure)
 
     ck = sub.add_parser("check", help="assert against a running daemon (L8)")
     ck.add_argument("--url", required=True, help="e.g. http://127.0.0.1:4767/mcp")
     ck.add_argument("--token", required=True)
+    _add_allure_args(ck)
     ck.set_defaults(func=cmd_check)
 
     # Backward-compatible default: no subcommand behaves like serve-check.
     parser.add_argument("--harbour", dest="root_harbour", help=argparse.SUPPRESS)
+    parser.add_argument("--alluredir", dest="root_alluredir", help=argparse.SUPPRESS)
+    parser.add_argument("--allure-name", dest="root_allure_name", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.mode is None:
         args.harbour = args.root_harbour
+        args.alluredir = args.root_alluredir
+        args.allure_name = args.root_allure_name
         return cmd_serve_check(args)
     return args.func(args)
 

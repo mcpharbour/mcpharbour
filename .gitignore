@@ -217,3 +217,7 @@ __marimo__/
 
 # Claude settings
 .claude/
+# Allure
+allure-results/
+allure-report/
+history.jsonl

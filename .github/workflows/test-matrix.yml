@@ -20,7 +20,7 @@ jobs:
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
           ./actionlint -color
 
-  # L1 + L2 — unit and integration suite on every OS.
+  # L1 + L2 — unit and integration suite on every OS (emits Allure results).
   pytest:
     strategy:
       fail-fast: false
@@ -28,8 +28,6 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
-      # Test process runs under this Python (keyrings.alt installed), so a file
-      # backend avoids any need for a headless system keyring.
       PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
     steps:
       - uses: actions/checkout@v4
@@ -39,10 +37,15 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]" keyrings.alt
       - name: Run unit + integration tests
-        run: python -m pytest tests/unit tests/integration -q
+        run: python -m pytest tests/unit tests/integration --alluredir=allure-results -q
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allure-results-pytest-${{ matrix.os }}
+          path: allure-results
+          if-no-files-found: ignore
 
-  # L3 — npx-backed end-to-end protocol test. Node/npx ships on the GitHub
-  # ubuntu runner; this is the one place the real downstream server is used.
+  # L3 — npx-backed end-to-end protocol test (ubuntu has Node/npx).
   e2e:
     runs-on: ubuntu-latest
     env:
@@ -58,13 +61,19 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]" keyrings.alt
       - name: Run e2e tests
-        run: python -m pytest tests/e2e -q
+        run: python -m pytest tests/e2e --alluredir=allure-results -q
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allure-results-e2e
+          path: allure-results
+          if-no-files-found: ignore
 
   # L4 — reusable binary build.
   build:
     uses: ./.github/workflows/build.yml
 
-  # L5 — run the usability scenario against the frozen binary (foreground serve).
+  # L5 — usability scenario against the frozen binary (also emits Allure).
   binary-smoke:
     needs: build
     strategy:
@@ -79,16 +88,12 @@ jobs:
             platform: windows-x64
     runs-on: ${{ matrix.os }}
     env:
-      # The frozen binary bundles keyrings.alt; this selects the file backend
-      # so identity creation works headless on every OS.
       PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # scenario.py + the docked downstream run under this Python (not the
-      # frozen binary), so they need mcp + httpx.
       - name: Install scenario deps
         run: pip install -e ".[dev]"
       - uses: actions/download-artifact@v4
@@ -104,7 +109,56 @@ jobs:
         run: Expand-Archive -Path mcp-harbour-${{ matrix.platform }}.zip -DestinationPath .
       - name: Run scenario (Unix)
         if: runner.os != 'Windows'
-        run: python tests/smoke/scenario.py serve-check --harbour ./harbour
+        run: python tests/smoke/scenario.py serve-check --harbour ./harbour --alluredir allure-results --allure-name "binary-smoke (${{ matrix.platform }})"
       - name: Run scenario (Windows)
         if: runner.os == 'Windows'
-        run: python tests/smoke/scenario.py serve-check --harbour .\harbour.exe
+        run: python tests/smoke/scenario.py serve-check --harbour .\harbour.exe --alluredir allure-results --allure-name "binary-smoke (${{ matrix.platform }})"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allure-results-binary-${{ matrix.platform }}
+          path: allure-results
+          if-no-files-found: ignore
+
+  # Aggregate all Allure results into one Allure 3 report and publish it to
+  # GitHub Pages (main push only). History is cached so trends accumulate.
+  # Requires Pages enabled on the repo (Settings → Pages → Source: GitHub Actions).
+  report:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [pytest, e2e, binary-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    concurrency:
+      group: allure-pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-results
+          pattern: allure-results-*
+          merge-multiple: true
+      - name: Restore Allure history
+        uses: actions/cache@v4
+        with:
+          path: history.jsonl
+          key: allure-history-${{ github.run_id }}
+          restore-keys: |
+            allure-history-
+      - name: Generate Allure 3 report
+        run: npx --yes allure@latest generate all-results -c allurerc.mjs --output allure-report
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: allure-report
+      - id: deploy
+        uses: actions/deploy-pages@v4

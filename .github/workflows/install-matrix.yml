@@ -60,10 +60,10 @@ jobs:
         run: |
           BIN="$HOME/.local/bin/harbour"
           test -x "$BIN" || { echo "installed binary missing"; exit 1; }
-          TOKEN=$(python tests/smoke/scenario.py configure --harbour "$BIN" | sed -n 's/^TOKEN=//p')
+          TOKEN=$(python tests/smoke/scenario.py configure --harbour "$BIN" --alluredir allure-results --allure-name "install configure (${{ matrix.platform }})" | sed -n 's/^TOKEN=//p')
           test -n "$TOKEN" || { echo "no token from configure"; exit 1; }
           nohup "$BIN" serve --port 4767 >serve.log 2>&1 &
-          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token "$TOKEN"
+          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token "$TOKEN" --alluredir allure-results --allure-name "install usage (${{ matrix.platform }})"
 
       - name: Uninstall (Unix)
         if: runner.os != 'Windows'
@@ -84,11 +84,18 @@ jobs:
         run: |
           $bin = Join-Path $env:LOCALAPPDATA "mcp-harbour\bin\harbour.exe"
           if (-not (Test-Path $bin)) { throw "installed binary missing" }
-          $out = python tests/smoke/scenario.py configure --harbour $bin
+          $out = python tests/smoke/scenario.py configure --harbour $bin --alluredir allure-results --allure-name "install configure (${{ matrix.platform }})"
           $token = ($out | Select-String -Pattern '^TOKEN=(.+)$').Matches.Groups[1].Value
           if (-not $token) { throw "no token from configure" }
           Start-Process $bin -ArgumentList 'serve','--port','4767' -RedirectStandardOutput serve.log -RedirectStandardError serveerr.log
-          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token $token
+          python tests/smoke/scenario.py check --url http://127.0.0.1:4767/mcp --token $token --alluredir allure-results --allure-name "install usage (${{ matrix.platform }})"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allure-results-install-${{ matrix.platform }}
+          path: allure-results
+          if-no-files-found: ignore
 
   # L7 + L8 (service) + L11 — install WITH the platform service, drive
   # start/stop/status, use the service-managed daemon, then uninstall.
