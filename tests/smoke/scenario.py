@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -34,6 +35,36 @@ import uuid
 from contextlib import AsyncExitStack
 from pathlib import Path
 from urllib.parse import urlparse
+
+
+def _popen_kwargs() -> dict:
+    # POSIX: own session so we can kill the whole group. Windows: taskkill /T
+    # handles the tree (PyInstaller onefile runs the real app as a child).
+    return {} if os.name == "nt" else {"start_new_session": True}
+
+
+def terminate_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 import httpx
 from mcp import ClientSession
@@ -231,25 +262,25 @@ def cmd_serve_check(args) -> int:
 
         port = free_port()
         url = f"http://127.0.0.1:{port}/mcp"
+        log_path = Path(tmp) / "daemon.log"
+        # Redirect to a file (not PIPE) so teardown never blocks draining a pipe
+        # that a surviving child still holds open.
+        logf = open(log_path, "w")
         daemon = subprocess.Popen(
             [*harbour, "serve", "--port", str(port)],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=env, stdout=logf, stderr=subprocess.STDOUT, **_popen_kwargs(),
         )
         try:
             if not wait_ready(url):
-                daemon.terminate()
                 print("FAIL: daemon did not become ready")
-                print(daemon.communicate(timeout=10)[0])
+                logf.flush()
+                print(log_path.read_text(errors="replace"))
                 return 1
             check_unauthenticated(url, checks)
             asyncio.run(run_client_checks(url, token, checks))
         finally:
-            daemon.terminate()
-            try:
-                daemon.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                daemon.kill()
-                daemon.communicate()
+            terminate_tree(daemon)
+            logf.close()
     return finish(checks, args, "serve-check")
 
 
