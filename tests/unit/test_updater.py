@@ -170,12 +170,14 @@ def test_run_update_installer_downloads_verifies_and_runs():
             {"name": "install.sh", "browser_download_url": "https://example.com/install.sh"},
         ],
     }
-    installer_text = "echo hi\n"
-    expected_sha = hashlib.sha256(installer_text.encode()).hexdigest()
+    installer_bytes = b"echo hi\n"
+    expected_sha = hashlib.sha256(installer_bytes).hexdigest()
     checksums_text = f"{expected_sha}  install.sh\n"
 
     def fake_download(url, dest):
-        dest.write_text(installer_text)
+        # write_bytes (not write_text) so the on-disk content matches the hash
+        # exactly — write_text translates \n -> \r\n on Windows.
+        dest.write_bytes(installer_bytes)
 
     with patch("mcp_harbour.updater._download", side_effect=fake_download), \
          patch("mcp_harbour.updater.download_text", return_value=checksums_text), \

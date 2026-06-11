@@ -13,6 +13,7 @@ jobs:
   # L0 — static lint of the workflow definitions themselves.
   actionlint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Run actionlint
@@ -22,6 +23,7 @@ jobs:
 
   # L1 + L2 — unit and integration suite on every OS (emits Allure results).
   pytest:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +49,7 @@ jobs:
 
   # L3 — npx-backed end-to-end protocol test (ubuntu has Node/npx).
   e2e:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     env:
       PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
@@ -76,6 +79,7 @@ jobs:
   # L5 — usability scenario against the frozen binary (also emits Allure).
   binary-smoke:
     needs: build
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +116,7 @@ jobs:
         run: python tests/smoke/scenario.py serve-check --harbour ./harbour --alluredir allure-results --allure-name "binary-smoke (${{ matrix.platform }})"
       - name: Run scenario (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: python tests/smoke/scenario.py serve-check --harbour .\harbour.exe --alluredir allure-results --allure-name "binary-smoke (${{ matrix.platform }})"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -127,6 +132,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [pytest, e2e, binary-smoke]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pages: write

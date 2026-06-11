@@ -69,7 +69,11 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           bash scripts/uninstall.sh || true
-          test ! -e "$HOME/.local/bin/harbour" && echo "uninstall removed binary" || { echo "binary still present"; exit 1; }
+          if [ ! -e "$HOME/.local/bin/harbour" ]; then
+            echo "uninstall removed binary"
+          else
+            echo "binary still present"; exit 1
+          fi
 
       # ---- Windows ----
       - name: Install via script, no service (Windows)
@@ -81,6 +85,7 @@ jobs:
 
       - name: Use installed binary (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $bin = Join-Path $env:LOCALAPPDATA "mcp-harbour\bin\harbour.exe"
           if (-not (Test-Path $bin)) { throw "installed binary missing" }
@@ -133,7 +138,8 @@ jobs:
         env:
           MCP_HARBOUR_LOCAL_ARCHIVE: ${{ github.workspace }}/mcp-harbour-linux-x64.tar.gz
         run: |
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
           loginctl enable-linger "$USER" || true
           systemctl --user set-environment PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring || true
           "$HOME/.local/bin/harbour" --help >/dev/null 2>&1 || true
@@ -147,7 +153,8 @@ jobs:
       - name: Service lifecycle + use (Linux)
         if: runner.os == 'Linux'
         run: |
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
           BIN="$HOME/.local/bin/harbour"
           "$BIN" status
           TOKEN=$(sed -n 's/^TOKEN=//p' configure.out)
@@ -191,6 +198,7 @@ jobs:
       # Windows: real Service Control Manager (runner is admin).
       - name: Install with Windows service (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         env:
           MCP_HARBOUR_LOCAL_ARCHIVE: ${{ github.workspace }}\mcp-harbour-windows-x64.zip
         run: |
@@ -201,6 +209,7 @@ jobs:
 
       - name: Service lifecycle + use (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $bin = Join-Path $env:LOCALAPPDATA "mcp-harbour\bin\harbour.exe"
           & $bin status
@@ -235,6 +244,7 @@ jobs:
           "$BIN" version
       - name: Install previous release then update (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $env:MCP_HARBOUR_NO_SERVICE = "1"
           powershell -ExecutionPolicy Bypass -File scripts/install.ps1

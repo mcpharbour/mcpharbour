@@ -55,6 +55,7 @@ jobs:
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           mkdir release
           copy dist\harbour.exe release\
