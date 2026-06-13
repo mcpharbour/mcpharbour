@@ -125,21 +125,17 @@ jobs:
           path: allure-results
           if-no-files-found: ignore
 
-  # Aggregate all Allure results into one Allure 3 report and publish it to
-  # GitHub Pages (main push only). History is cached so trends accumulate.
-  # Requires Pages enabled on the repo (Settings → Pages → Source: GitHub Actions).
+  # Generate this run's Allure 3 report, publish it under runs/<run-number>/
+  # on the gh-pages branch (keeping prior runs), and regenerate the landing
+  # page that lists every run. Pages must serve the gh-pages branch
+  # (Settings → Pages → Source: Deploy from a branch → gh-pages / root).
   report:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [pytest, e2e, binary-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      contents: write
     concurrency:
       group: allure-pages
       cancel-in-progress: false
@@ -161,10 +157,32 @@ jobs:
           restore-keys: |
             allure-history-
       - name: Generate Allure 3 report
-        run: npx --yes allure@latest generate all-results -c allurerc.mjs --output allure-report
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+        run: npx --yes allure@latest generate all-results -c allurerc.mjs --output run-report
+      - name: Assemble site (this run's report + landing index)
+        run: |
+          mkdir -p "publish/runs/${{ github.run_number }}"
+          cp -r run-report/. "publish/runs/${{ github.run_number }}/"
+          # Seed runs.json from the existing gh-pages branch (source of truth,
+          # not the CDN); empty list on the first run.
+          if git fetch origin gh-pages --depth=1 2>/dev/null; then
+            git show origin/gh-pages:runs.json > publish/runs.json 2>/dev/null || echo "[]" > publish/runs.json
+          else
+            echo "[]" > publish/runs.json
+          fi
+          python tests/ci/build_report_index.py \
+            --site publish \
+            --results all-results \
+            --repo "${{ github.repository }}" \
+            --run-number "${{ github.run_number }}" \
+            --run-id "${{ github.run_id }}" \
+            --date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --ref "${{ github.ref_name }}" \
+            --commit "${{ github.sha }}" \
+            --trigger "${{ github.event_name }}"
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: allure-report
-      - id: deploy
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: publish
+          publish_branch: gh-pages
+          keep_files: true

@@ -324,12 +324,18 @@ the unit/integration/e2e suites emit Allure results via `--alluredir`, and the
 smoke scenario emits its own Allure result file (each check becomes a step) when
 run with `--alluredir`. In CI, every result-producing job uploads its
 `allure-results-*` artifact; the `report` job in `test-matrix.yml` aggregates
-them, runs `allure generate` (config in `allurerc.mjs`), and deploys the report
-to **GitHub Pages** on `main` pushes. Trend history is persisted via an
-`actions/cache` of `history.jsonl`.
+them and runs `allure generate` (config in `allurerc.mjs`).
 
-Setup note: **GitHub Pages must be enabled** (Settings → Pages → Source: GitHub
-Actions) for the `report` job to publish; otherwise it fails at deploy.
+Each `main` run's report is published to **`runs/<run-number>/` on the
+`gh-pages` branch** (prior runs are kept via `keep_files`). A **landing page**
+at the site root lists every run in a table — Run, Date (UTC), Ref, Commit,
+Trigger, Passed, Failed, Skipped, Report — built by
+`tests/ci/build_report_index.py` from a `runs.json` manifest carried on the
+branch. Per-run trend charts come from an `actions/cache` of `history.jsonl`.
+
+Setup note: **Pages must serve the `gh-pages` branch** (Settings → Pages →
+Source: Deploy from a branch → `gh-pages` / root). The `report` job pushes with
+the built-in `GITHUB_TOKEN` (`contents: write`).
 
 Locally: `make allure` (suite + scenario → report) or `make allure-serve` (live
 server). Needs the Allure 3 CLI: `npm install -g allure`.
