@@ -1,0 +1,13 @@
+[
+  {
+    "run_number": 5,
+    "run_id": "27469724137",
+    "date": "2026-06-13T14:41:46Z",
+    "ref": "main",
+    "commit": "3a0ae7cb2ce1fc6e407c618edb8b15685fe6118c",
+    "trigger": "push",
+    "passed": 477,
+    "failed": 0,
+    "skipped": 0
+  }
+]

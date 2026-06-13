@@ -1,0 +1,1 @@
+ERROR    mcp_harbour:gateway.py:210 Failed to start docked server 'broken-server': connection refused

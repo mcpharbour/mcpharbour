@@ -1,0 +1,5 @@
+INFO:     127.0.0.1:32970 - "POST /mcp HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:32978 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32984 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:32990 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33002 - "POST /mcp HTTP/1.1" 200 OK

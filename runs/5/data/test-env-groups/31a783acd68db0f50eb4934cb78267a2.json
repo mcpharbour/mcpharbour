@@ -1,0 +1,1 @@
+{"id":"31a783acd68db0f50eb4934cb78267a2","fullName":"tests.unit.test_process_manager.TestHarbourDaemon#test_stop_shared_server_clears_failed_health_without_process","name":"test_stop_shared_server_clears_failed_health_without_process","status":"passed","testResultsByEnv":{"default":"afbb85e1a266e2c2682c6c7502b59ae5"}}
