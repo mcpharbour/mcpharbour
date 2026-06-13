@@ -1,8 +1,6 @@
 name: Test Matrix
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -127,10 +125,11 @@ jobs:
 
   # Generate this run's Allure 3 report, publish it under runs/<run-number>/
   # on the gh-pages branch (keeping prior runs), and regenerate the landing
-  # page that lists every run. Pages must serve the gh-pages branch
-  # (Settings → Pages → Source: Deploy from a branch → gh-pages / root).
+  # page that lists every run. Publishing only happens on manual dispatch —
+  # pull requests run the suite as validation but do not publish. Pages must
+  # serve the gh-pages branch (Settings → Pages → Deploy from a branch → gh-pages / root).
   report:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'
     needs: [pytest, e2e, binary-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 15

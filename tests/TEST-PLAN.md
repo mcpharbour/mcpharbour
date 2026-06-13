@@ -326,8 +326,10 @@ run with `--alluredir`. In CI, every result-producing job uploads its
 `allure-results-*` artifact; the `report` job in `test-matrix.yml` aggregates
 them and runs `allure generate` (config in `allurerc.mjs`).
 
-Each `main` run's report is published to **`runs/<run-number>/` on the
-`gh-pages` branch** (prior runs are kept via `keep_files`). A **landing page**
+The matrix runs on `pull_request` (validation only — no publish) and on
+`workflow_dispatch`. Each **dispatched** run's report is published to
+**`runs/<run-number>/` on the `gh-pages` branch** (prior runs are kept via
+`keep_files`). A **landing page**
 at the site root lists every run in a table — Run, Date (UTC), Ref, Commit,
 Trigger, Passed, Failed, Skipped, Report — built by
 `tests/ci/build_report_index.py` from a `runs.json` manifest carried on the
